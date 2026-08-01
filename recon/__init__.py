@@ -1,0 +1,825 @@
+"""
+Recon: a WiFi and Bluetooth scanner that tells you what things actually are.
+
+Listens to what the air is already carrying and names it. Every access point
+beacon and BLE advertisement parsed here is a public broadcast; the app never
+connects, transmits, associates, or captures traffic. It is the same
+information your phone's WiFi list shows, plus the vendor and protocol
+databases a phone hides from you.
+
+  DASH     what is around you, counted by kind
+  LIVE     everything in range, strongest first, identified
+  DETAIL   everything known about one device
+  FLAGS    open networks, WEP, possible evil twins, Find My beacons
+  VENDORS  who makes the hardware in this room
+  LOG      the persistent all-week tally
+
+  B      next view          A      drill in / open detail / back
+  UP/DN  scroll             C      clear filter, or cycle wifi/ble
+  HOME   back to launcher
+
+From DASH, pick a row and press A to see just those devices.
+
+Holding UP+DOWN together for two seconds on LOG erases the log.
+"""
+
+import bluetooth
+import network
+import os
+import sys
+import time
+
+APP_DIR = "/system/apps/recon"
+os.chdir(APP_DIR)
+sys.path.insert(0, APP_DIR)
+
+import identify as ID
+from store import Log
+
+W, H = 160, 120
+
+DASH, LIVE, FLAGS, VENDORS, LOGVIEW = 0, 1, 2, 3, 4
+N_VIEWS = 5
+
+F_ALL, F_WIFI, F_BLE = 0, 1, 2
+FILTER_NAME = ("ALL", "WIFI", "BLE")
+
+_IRQ_SCAN_RESULT = 5
+
+ROWS = 6
+ROW_H = 14
+
+WINDOW_MS = 45_000          # unheard for this long = no longer "in range"
+WIFI_EVERY_MS = 20_000
+FLUSH_EVERY_MS = 30_000
+RESORT_MS = 900             # sorting thousands of entries per frame is not free
+RESOLVE_PER_FRAME = 2       # a cold vendor lookup is ~4ms; two fits in a frame
+
+# Hard ceiling on the live set. Measured: 1200 devices holds every view under
+# a frame; past that, garbage collection over the object graph alone exceeds
+# the frame budget. The persistent log
+# holds far more (9557 devices), so this only bounds what is tracked as "in
+# the room right now", which is all the live views claim to show.
+MAX_LIVE_BLE = 1200
+
+# Stale entries are dropped inside the same pass that computes the aggregates,
+# so the walk and its key snapshot are paid for once.
+
+# Entry layout. Lists, not dicts: at conference scale the per-object overhead
+# of a dict per device is the difference between fitting in RAM and not.
+# BLE:  0 kind 1 rssi 2 first 3 last 4 label 5 detail 6 tags 7 company 8 raw 9 cat 10 vendor
+# WIFI: 0 ssid 1 chan 2 rssi  3 sec  4 first 5 last  6 label 7 detail 8 tags  9 cat 10 vendor
+#
+# Vendor is resolved once, here, rather than when a view needs it. Looking it
+# up per device per frame cost 437ms a frame in a 3000-device room.
+
+SLATE = color.rgb(11, 15, 22)
+FG = color.rgb(226, 238, 248)
+DIM = color.rgb(226, 238, 248, 110)
+FAINT = color.rgb(255, 255, 255, 26)
+CYAN = color.rgb(46, 200, 224)
+AMBER = color.rgb(246, 176, 40)
+RED = color.rgb(232, 66, 58)
+GREEN = color.rgb(30, 190, 120)
+VIOLET = color.rgb(158, 122, 244)
+
+HEAD_BG = color.rgb(20, 30, 44)
+SEL_BG = color.rgb(255, 255, 255, 30)
+BAR_BG = color.rgb(46, 200, 224, 70)
+
+# ---- state ------------------------------------------------------------------
+
+wifi = {}         # bssid -> list
+ble = {}          # addr  -> list
+rotating = set()  # addresses that re-randomise; counted, not kept
+
+pending = []      # BLE addrs awaiting identification
+log = Log()
+
+view = DASH
+filt = F_ALL
+cat_filter = None   # set by drilling into a dashboard row
+cat_cursor = 0
+cursor = 0
+top = 0
+detail_open = False
+order = []
+evil = {}
+
+# ticks_diff() is only meaningful for values that came from ticks_ms(), so
+# timers are seeded one interval in the past rather than with a raw negative.
+# A bare -20000 is undefined input and made intervals fire unpredictably.
+_boot = time.ticks_ms()
+last_sort = time.ticks_add(_boot, -RESORT_MS)
+last_wifi = time.ticks_add(_boot, -WIFI_EVERY_MS)
+last_flush = _boot
+wifi_pending = False
+wifi_busy = False
+wipe_start = 0
+started = time.ticks_ms()
+
+wlan = network.WLAN(network.STA_IF)
+wlan.active(True)
+
+
+def _now():
+    """Epoch seconds, or 0 when the RTC has never been set."""
+    try:
+        t = time.time()
+    except OverflowError:
+        return 0        # RTC never set
+    return t if t > 1_600_000_000 else 0
+
+
+# ---- radios -----------------------------------------------------------------
+
+def _irq(event, data):
+    """Kept deliberately thin. Copying the advertising payload for a device we
+    already know would allocate on every packet, and a busy room delivers
+    hundreds a second."""
+    if event != _IRQ_SCAN_RESULT:
+        return
+    addr_type, addr, _adv_type, rssi, adv = data
+    a = bytes(addr)
+    now = time.ticks_ms()
+
+    e = ble.get(a)
+    if e is not None:
+        e[1] = rssi
+        e[3] = now
+        return
+
+    if len(ble) >= MAX_LIVE_BLE:
+        return
+
+    kind = ID.ble_addr_kind(addr_type, addr)
+    if kind not in ID.STABLE_KINDS:
+        rotating.add(a)
+
+    ble[a] = [kind, rssi, _now(), now, None, "", (), None, bytes(adv),
+              ID.CAT_OTHER, None]
+    pending.append(a)
+
+
+ble_radio = bluetooth.BLE()
+ble_radio.active(True)
+ble_radio.irq(_irq)
+ble_radio.gap_scan(0, 30000, 30000, True)
+
+
+def _wifi_scan():
+    global evil
+    # The cyw43 shares one radio between WiFi and BLE. With BLE holding a
+    # continuous scan, wlan.scan() still returns APs but every RSSI comes back
+    # as 0, so the listen has to be paused for the duration.
+    try:
+        ble_radio.gap_scan(None)
+    except OSError:
+        pass
+    try:
+        raw = wlan.scan()
+    except OSError:
+        return
+    finally:
+        try:
+            ble_radio.gap_scan(0, 30000, 30000, True)
+        except OSError:
+            pass
+    now = time.ticks_ms()
+    epoch = _now()
+    for ssid_b, bssid_b, chan, rssi, sec, _hidden in raw:
+        b = bytes(bssid_b)
+        ssid = ssid_b.decode("utf-8", "replace") if ssid_b else ""
+        e = wifi.get(b)
+        if e is None:
+            label, detail, tags = ID.describe_wifi(ssid, b, sec)
+            wifi[b] = [ssid, chan, rssi, sec, epoch, now, label, detail, tags,
+                       ID.classify_wifi(ssid),
+                       ID.vendor_for_mac(b, virtual_ok=True)]
+            log.add_wifi(b, ssid, chan, rssi, sec, epoch)
+        else:
+            e[2] = rssi
+            e[5] = now
+    # Only meaningful across the whole set, and cheap at WiFi scan cadence.
+    evil = ID.find_evil_twins(
+        {k: (v[0], v[1], v[2], v[3]) for k, v in wifi.items()})
+
+
+# ---- identification ---------------------------------------------------------
+
+def _resolve_some():
+    """Name a couple of devices per frame. A cold vendor lookup costs about
+    4ms, so resolving a backlog all at once would visibly stall."""
+    done = 0
+    while pending and done < RESOLVE_PER_FRAME:
+        a = pending.pop()
+        e = ble.get(a)
+        if e is None or e[8] is None:
+            continue
+        try:
+            adv = ID.parse_adv(e[8])
+            label, detail, tags = ID.describe_ble(a, adv)
+            e[4] = label
+            e[5] = detail
+            e[6] = tuple(tags)
+            e[7] = adv.get("company")
+            e[9] = ID.classify_ble(adv, label)
+            company = e[7]
+            e[10] = (ID.company_name(company) if company is not None else None) \
+                or ID.vendor_for_mac(a)
+            if ID.is_find_my(adv):
+                e[6] = e[6] + ("findmy",)
+        except Exception:  # noqa: BLE001 - never crash on a malformed payload
+            e[4] = "%02X:%02X:%02X" % (a[3], a[4], a[5])
+        e[8] = None  # drop the payload; it is the biggest part of the record
+        # Decided from the payload, not just the address bits: a Find My
+        # beacon looks static by its bits but rotates every ~15 minutes.
+        if ID.is_rotating(e[0], adv):
+            rotating.add(a)
+        else:
+            log.add_ble(a, e[0], e[1], e[7], e[2], e[4] or "")
+        done += 1
+
+
+# ---- live set ---------------------------------------------------------------
+
+# Nobody scrolls past this on a six-row screen, and leaving it unbounded means
+# a hostile room decides how much work every frame does.
+LIVE_CAP = 400
+
+
+def _live_rows():
+    """Merged, filtered, signal-sorted view of what is in range right now.
+
+    Bucketed by RSSI rather than sorted. RSSI is a small integer, so 101
+    buckets give an O(n) ordering with no comparisons. The obvious
+    sorted(key=lambda) cost 2.9 seconds at 3500 devices, because every
+    comparison called back into Python.
+    """
+    now = time.ticks_ms()
+    buckets = [None] * 101
+
+    def put(rssi, kind, key):
+        i = -rssi
+        if i < 0:
+            i = 0
+        elif i > 100:
+            i = 100
+        b = buckets[i]
+        if b is None:
+            buckets[i] = b = []
+        b.append((rssi, kind, key))
+
+    if filt in (F_ALL, F_WIFI):
+        for k, e in wifi.items():
+            # APs are only re-heard on the WiFi scan cadence, so they get a
+            # longer grace period than BLE.
+            if time.ticks_diff(now, e[5]) <= WINDOW_MS * 3:
+                if cat_filter is None or e[9] == cat_filter:
+                    put(e[2], "W", k)
+    if filt in (F_ALL, F_BLE):
+        for k, e in ble.items():
+            if time.ticks_diff(now, e[3]) <= WINDOW_MS:
+                if cat_filter is None or e[9] == cat_filter:
+                    put(e[1], "B", k)
+
+    rows = []
+    for i in range(101):
+        b = buckets[i]
+        if b:
+            rows.extend(b)
+            if len(rows) >= LIVE_CAP:
+                return rows[:LIVE_CAP]
+    return rows
+
+
+def _entry(kind, key):
+    return (wifi if kind == "W" else ble).get(key)
+
+
+def _label_of(kind, key):
+    e = _entry(kind, key)
+    if e is None:
+        return "?", "", ()
+    if kind == "W":
+        return e[6], e[7], e[8]
+    return (e[4] or "identifying…"), e[5], e[6]
+
+
+def _bars(rssi):
+    if rssi >= -52:
+        return 5
+    if rssi >= -64:
+        return 4
+    if rssi >= -74:
+        return 3
+    if rssi >= -84:
+        return 2
+    if rssi >= -94:
+        return 1
+    return 0
+
+
+def _tag_colour(tags):
+    if "open" in tags or "wep" in tags or "suspicious" in tags:
+        return RED
+    if "tracker" in tags or "findmy" in tags:
+        return AMBER
+    if "virtual" in tags:
+        return None
+    return None
+
+
+# ---- chrome -----------------------------------------------------------------
+
+def _header(title, right=""):
+    screen.pen = HEAD_BG
+    screen.rectangle(0, 0, W, 13)
+    screen.font = rom_font.winds
+    screen.pen = CYAN
+    screen.text(title, 4, 0)
+    if right:
+        screen.pen = DIM
+        screen.text(right, W - screen.measure_text(right)[0] - 4, 0)
+
+
+def _footer(left):
+    screen.pen = FAINT
+    screen.rectangle(0, H - 11, W, 11)
+    screen.font = rom_font.winds
+    screen.pen = DIM
+    screen.text(left, 4, H - 12)
+    if wifi_busy:
+        screen.pen = CYAN
+        screen.text("wifi", W - screen.measure_text("wifi")[0] - 4, H - 12)
+
+
+def _scrollbar(n):
+    if n <= ROWS:
+        return
+    track = ROWS * ROW_H
+    h = max(6, int(track * ROWS / n))
+    pos = int((track - h) * top / max(1, n - ROWS))
+    screen.pen = color.rgb(255, 255, 255, 70)
+    screen.rectangle(W - 2, 15 + pos, 2, h)
+
+
+def _signal(x, y, rssi, pen):
+    n = _bars(rssi)
+    for b in range(5):
+        screen.pen = pen if b < n else FAINT
+        screen.rectangle(x + b * 4, y + 9 - (b + 1) * 2, 3, (b + 1) * 2)
+
+
+# ---- views ------------------------------------------------------------------
+
+CAT_COLOUR = None  # built on first draw, once the palette exists
+
+# Aggregates are computed by walking every device, which is O(n) and therefore
+# cannot happen per frame: at 3000 devices that alone was 50ms. Instead one
+# pass is spread across frames in fixed-size chunks, so per-frame cost stays
+# flat no matter how hostile the room gets. Views read the last completed pass.
+STATS_CHUNK = 300
+STATS_EVERY_MS = 2000
+
+stats = {"counts": [0] * ID.N_CATS, "findmy": 0, "open": 0, "wep": 0,
+         "trackers": 0, "vendors": [], "log_kb": 0, "log_use": 0.0,
+         "live": 0}
+
+_acc = None
+_acc_w = None
+_acc_b = None
+_acc_i = 0
+_last_pass = time.ticks_add(time.ticks_ms(), -STATS_EVERY_MS)
+
+pruned_total = 0
+
+
+def _stats_step():
+    """Advance the rolling pass by one chunk, aggregating and pruning together.
+
+    These were two passes with two key snapshots. Each snapshot is a list as
+    long as the device dict, and allocating two of them per cycle triggered
+    garbage collection often enough to dominate the frame: at 1200 devices a
+    single gc.collect() costs 70ms. Sharing one walk halved the churn and took
+    the frame back from 80ms to 10ms.
+
+    Two things here are load-bearing. The snapshots are plain lists of existing
+    key objects, not freshly built tuples. And a pass only starts on a timer,
+    so a crowded room does not put the badge in a permanent scanning loop.
+    """
+    global _acc, _acc_w, _acc_b, _acc_i, _last_pass, stats, pruned_total
+
+    now = time.ticks_ms()
+    if _acc is None:
+        if time.ticks_diff(now, _last_pass) < STATS_EVERY_MS:
+            return
+        _acc = {"counts": [0] * ID.N_CATS, "findmy": 0, "open": 0, "wep": 0,
+                "trackers": 0, "vendors": {},
+                # Two os.stat calls; cheap once a pass, 20ms a frame otherwise.
+                "log_kb": log.bytes_used() // 1024, "log_use": log.usage(),
+                "live": 0}
+        # The BLE dict is mutated from an interrupt, so it cannot be iterated
+        # directly across frames.
+        _acc_w = list(wifi)
+        _acc_b = list(ble)
+        _acc_i = 0
+
+    n_w = len(_acc_w)
+    total = n_w + len(_acc_b)
+    end = _acc_i + STATS_CHUNK
+    if end > total:
+        end = total
+
+    counts = _acc["counts"]
+    vendors = _acc["vendors"]
+
+    for i in range(_acc_i, end):
+        if i < n_w:
+            e = wifi.get(_acc_w[i])
+            if e is None or time.ticks_diff(now, e[5]) > WINDOW_MS * 3:
+                continue
+            if e[3] == 0:
+                _acc["open"] += 1
+            elif e[3] == 1:
+                _acc["wep"] += 1
+        else:
+            key = _acc_b[i - n_w]
+            e = ble.get(key)
+            if e is None:
+                continue
+            if time.ticks_diff(now, e[3]) > WINDOW_MS:
+                # Stale. Drop it here rather than in a second pass: without
+                # this the live set only grows, so every view gets slower all
+                # conference and the counts drift from the actual room.
+                # Anything still awaiting identification is kept.
+                if e[8] is None:
+                    del ble[key]
+                    pruned_total += 1
+                continue
+            if "findmy" in e[6]:
+                _acc["findmy"] += 1
+            if e[9] == ID.CAT_TRACKER:
+                _acc["trackers"] += 1
+
+        counts[e[9]] += 1
+        _acc["live"] += 1
+        v = e[10]
+        if v:
+            vendors[v] = vendors.get(v, 0) + 1
+
+    _acc_i = end
+    if _acc_i >= total:
+        _acc["vendors"] = sorted(vendors.items(), key=lambda kv: -kv[1])[:6]
+        stats = _acc
+        _acc = None
+        _acc_w = None
+        _acc_b = None
+        _last_pass = now
+
+
+def _draw_dash():
+    global CAT_COLOUR
+    if CAT_COLOUR is None:
+        CAT_COLOUR = (CYAN, VIOLET, GREEN, AMBER, CYAN, RED, AMBER, DIM)
+
+    counts = stats["counts"]
+    _header("RECON", "%d live" % stats["live"])
+
+    # 2 columns x 4 rows. Reading order, so UP/DOWN still walks it linearly.
+    CW, CH, TOP = 80, 23, 15
+    for i in range(ID.N_CATS):
+        cx = (i % 2) * CW
+        cy = TOP + (i // 2) * CH
+        n = counts[i]
+
+        if i == cat_cursor:
+            screen.pen = SEL_BG
+            screen.rectangle(cx, cy, CW - 1, CH - 1)
+
+        screen.pen = CAT_COLOUR[i] if n else DIM
+        screen.rectangle(cx + 5, cy + 4, 4, 12)
+
+        screen.font = rom_font.nope
+        screen.pen = FG if n else DIM
+        screen.text(str(n), cx + 13, cy + 1)
+
+        screen.font = rom_font.winds
+        screen.pen = DIM
+        screen.text(ID.CAT_NAME[i], cx + 13, cy + 12)
+
+
+def _draw_live():
+    shown = len(order)
+    _header(ID.CAT_NAME[cat_filter].upper() if cat_filter is not None else "LIVE",
+            "%d+" % shown if shown >= LIVE_CAP else "%d" % shown)
+    screen.font = rom_font.winds
+
+    if not order:
+        screen.pen = DIM
+        screen.text("listening...", 46, 52)
+        return
+
+    for i in range(ROWS):
+        idx = top + i
+        if idx >= len(order):
+            break
+        rssi, kind, key = order[idx]
+        y = 15 + i * ROW_H
+        if idx == cursor:
+            screen.pen = SEL_BG
+            screen.rectangle(0, y - 1, W, ROW_H)
+
+        label, _detail, tags = _label_of(kind, key)
+        accent = CYAN if kind == "W" else VIOLET
+        _signal(3, y, rssi, accent)
+
+        screen.pen = accent
+        screen.text(kind, 26, y)
+
+        screen.pen = _tag_colour(tags) or FG
+        if len(label) > 16:
+            label = label[:15] + "…"
+        screen.text(label, 35, y)
+
+    _scrollbar(len(order))
+
+
+def _draw_detail():
+    rssi, kind, key = order[cursor]
+    e = _entry(kind, key)
+    if e is None:
+        return
+    label, detail, tags = _label_of(kind, key)
+
+    _header("WIFI AP" if kind == "W" else "BLE DEVICE", "%d dBm" % rssi)
+    screen.font = rom_font.winds
+
+    screen.pen = FG
+    screen.text(label[:24], 4, 15)
+
+    rows = [("mac", ":".join("%02X" % b for b in key))]
+    if kind == "W":
+        rows.append(("vendor", e[10] or "unknown"))
+        rows.append(("channel", "%d  %s" % (e[1], ID.SECURITY.get(e[3], "?"))))
+        if detail:
+            rows.append(("looks like", detail))
+    else:
+        rows.append(("address", ID.ADDR_KIND_NAME[e[0]]))
+        rows.append(("company", e[10] or "unknown"))
+        if detail:
+            rows.append(("protocol", detail))
+
+    y = 29
+    for k, v in rows:
+        screen.pen = DIM
+        screen.text(k, 4, y)
+        screen.pen = FG
+        screen.text(str(v)[:19], 52, y)
+        y += 13
+
+    if tags:
+        screen.pen = _tag_colour(tags) or GREEN
+        screen.text(" ".join(tags)[:26], 4, H - 25)
+
+
+def _draw_flags():
+    _header("FLAGS")
+    screen.font = rom_font.winds
+
+    open_aps = stats["open"]
+    wep_aps = stats["wep"]
+    trackers = stats["trackers"]
+    findmy = stats["findmy"]
+
+    rows = (
+        ("open networks", open_aps, RED if open_aps else GREEN),
+        ("WEP (ancient)", wep_aps, RED if wep_aps else GREEN),
+        ("possible twins", len(evil), AMBER if evil else GREEN),
+        ("trackers", trackers, AMBER if trackers else GREEN),
+        ("find my", findmy, DIM),
+    )
+    y = 16
+    for name, n, col in rows:
+        screen.pen = DIM
+        screen.text(name, 8, y)
+        screen.pen = col
+        screen.text(str(n), 120, y)
+        y += 13
+
+    # Name the most interesting twin; a count alone is not actionable.
+    if evil:
+        ssid = list(evil.keys())[0]
+        why, count = evil[ssid]
+        screen.pen = AMBER
+        screen.text(ssid[:18], 8, y + 4)
+        screen.pen = DIM
+        screen.text("%s, %d APs" % (why, count), 8, y + 14)
+    else:
+        screen.pen = DIM
+        screen.text("find my = phones too", 8, y + 4)
+
+
+def _draw_vendors():
+    _header("VENDORS")
+    screen.font = rom_font.winds
+
+    rows = stats["vendors"]
+    if not rows:
+        screen.pen = DIM
+        screen.text("identifying...", 44, 52)
+        return
+
+    peak = rows[0][1]
+    y = 16
+    for name, n in rows:
+        screen.pen = BAR_BG
+        screen.rectangle(4, y, int(152 * n / peak), 12)
+        screen.pen = FG
+        screen.text(name[:18], 7, y)
+        screen.pen = DIM
+        s = str(n)
+        screen.text(s, W - screen.measure_text(s)[0] - 5, y)
+        y += 15
+
+
+def _draw_log():
+    _header("LOG (ALL WEEK)")
+    screen.font = rom_font.winds
+
+    mins = time.ticks_diff(time.ticks_ms(), started) // 60000
+    use = stats["log_use"]
+    rows = [
+        ("access points", str(log.wifi_count), FG),
+        ("ble devices", str(log.ble_count), FG),
+        ("rotating", "~%d" % len(rotating), DIM),
+        ("tracked now", "%d" % len(ble), DIM),
+        ("in range now", str(stats["live"]), FG),
+        ("session", "%dm" % mins, DIM),
+    ]
+    if log.unsaved:
+        rows.append(("NOT SAVED", str(log.unsaved), RED))
+    y = 15
+    for name, val, col in rows:
+        screen.pen = DIM
+        screen.text(name, 8, y)
+        screen.pen = col
+        screen.text(val, 104, y)
+        y += 12
+
+    # Capacity meter. The filesystem is 1MB and shared, so filling it silently
+    # is a real way to lose a day of collection.
+    bar_y = y + 3
+    meter = RED if log.full else (AMBER if use > 0.75 else GREEN)
+    screen.pen = FAINT
+    screen.rectangle(8, bar_y, 144, 7)
+    screen.pen = meter
+    if use > 0:
+        screen.rectangle(8, bar_y, max(1, int(144 * use)), 7)
+
+    screen.pen = meter
+    if log.full:
+        msg = "LOG FULL - export now"
+    elif use > 0.75:
+        msg = "%d%% full - export soon" % (use * 100)
+    else:
+        msg = "%d KB used  (%d%%)" % (stats["log_kb"], use * 100)
+    screen.text(msg, 8, bar_y + 10)
+
+    if wipe_start:
+        held = badge.ticks - wipe_start
+        screen.pen = RED
+        screen.rectangle(0, H - 9, int(W * min(1.0, held / 2000)), 9)
+        screen.pen = FG
+        screen.text("hold to erase", 40, H - 11)
+
+
+# ---- main loop --------------------------------------------------------------
+
+def update():
+    global view, filt, cursor, top, order, last_sort, last_wifi, last_flush
+    global wifi_pending, wifi_busy, detail_open, wipe_start
+    global cat_filter, cat_cursor
+
+    now_ms = time.ticks_ms()
+
+    # ---- input
+    if badge.pressed(BUTTON_B) and not detail_open:
+        view = (view + 1) % N_VIEWS
+        cursor = top = 0
+        if view == DASH:
+            cat_filter = None
+            last_sort = time.ticks_add(time.ticks_ms(), -RESORT_MS)
+
+    if badge.pressed(BUTTON_A):
+        if view == DASH:
+            # Drill into the selected bucket.
+            cat_filter = cat_cursor
+            filt = F_ALL
+            view = LIVE
+            cursor = top = 0
+            last_sort = time.ticks_add(time.ticks_ms(), -RESORT_MS)
+        elif view == LIVE and order:
+            detail_open = not detail_open
+
+    if badge.pressed(BUTTON_C) and not detail_open:
+        if view == LIVE and cat_filter is not None:
+            cat_filter = None          # first press clears the drill-down
+        else:
+            filt = (filt + 1) % 3
+        cursor = top = 0
+        last_sort = time.ticks_add(time.ticks_ms(), -RESORT_MS)
+
+    if not detail_open:
+        if view == DASH:
+            if badge.pressed(BUTTON_DOWN):
+                cat_cursor = (cat_cursor + 1) % ID.N_CATS
+            if badge.pressed(BUTTON_UP):
+                cat_cursor = (cat_cursor - 1) % ID.N_CATS
+        else:
+            if badge.pressed(BUTTON_DOWN) and cursor < len(order) - 1:
+                cursor += 1
+                if cursor >= top + ROWS:
+                    top = cursor - ROWS + 1
+            if badge.pressed(BUTTON_UP) and cursor > 0:
+                cursor -= 1
+                if cursor < top:
+                    top = cursor
+
+    if view == LOGVIEW and badge.held(BUTTON_UP) and badge.held(BUTTON_DOWN):
+        if not wipe_start:
+            wipe_start = badge.ticks
+        elif badge.ticks - wipe_start > 2000:
+            log.erase()
+            wifi.clear()
+            ble.clear()
+            rotating.clear()
+            wipe_start = 0
+    else:
+        wipe_start = 0
+
+    # ---- work
+    _resolve_some()
+    _stats_step()
+
+    if time.ticks_diff(now_ms, last_sort) >= RESORT_MS:
+        last_sort = now_ms
+        order = _live_rows()
+        if cursor >= len(order):
+            cursor = max(0, len(order) - 1)
+        if top > cursor:
+            top = cursor
+
+    if time.ticks_diff(now_ms, last_wifi) >= WIFI_EVERY_MS:
+        last_wifi = now_ms
+        wifi_pending = True
+
+    if log.dirty and time.ticks_diff(now_ms, last_flush) >= FLUSH_EVERY_MS:
+        last_flush = now_ms
+        log.flush(_now())
+
+    # ---- draw
+    screen.pen = SLATE
+    screen.clear()
+
+    if detail_open and view == LIVE and order:
+        _draw_detail()
+        _footer("A back")
+    elif view == DASH:
+        _draw_dash()
+        _footer("A drill in   B views")
+    elif view == LIVE:
+        _draw_live()
+        _footer("A detail  C %s" % (
+            "all" if cat_filter is not None else FILTER_NAME[filt]))
+    elif view == FLAGS:
+        _draw_flags()
+        _footer("B next")
+    elif view == VENDORS:
+        _draw_vendors()
+        _footer("B next")
+    else:
+        _draw_log()
+        _footer("UP+DN erase")
+
+    if wifi_pending:
+        # Show the marker before the scan blocks for a couple of seconds.
+        wifi_busy = True
+        badge.update()
+        _wifi_scan()
+        wifi_pending = False
+        wifi_busy = False
+
+
+
+def on_exit():
+    log.flush(_now())
+    try:
+        ble_radio.gap_scan(None)
+    except OSError:
+        pass
+    ble_radio.active(False)
+    wlan.active(False)
+
+
+run(update)

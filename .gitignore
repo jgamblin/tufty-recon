@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+
+# Build artifacts and pulled data
+dist/
+exports/
+.cache/
+
+# Raw framebuffer dumps; tools/screenshot.py keeps only the PNG
+*.raw
+
+.DS_Store

@@ -82,6 +82,7 @@ Needs badgeware firmware **v2.0.2 or newer**.
 
 | View | Shows |
 | --- | --- |
+| **BILLBOARD** | One big number, readable from a couple of metres. For wearing it facing outward. |
 | **DASH** | What is around you, counted by kind. Pick a row, press **A** to see only those. |
 | **LIVE** | Everything in range, strongest first. **A** opens a detail page. |
 | **FLAGS** | Open networks, WEP, possible evil twins, trackers, Find My. |
@@ -90,6 +91,11 @@ Needs badgeware firmware **v2.0.2 or newer**.
 
 **B** next view · **A** drill in / detail / back · **UP/DOWN** scroll ·
 **C** clear filter or cycle wifi/ble · **HOME** back to the launcher
+
+It opens on BILLBOARD, which exists because every other view is designed for
+arm's length: at 12px a capital subtends about 7 arcminutes from two metres,
+under the ~10 needed to read at a glance. The billboard sets its number at up
+to 76px, around 34 arcminutes, so it is legible to someone walking behind you.
 
 ## How it identifies things
 

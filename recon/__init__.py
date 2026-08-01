@@ -38,8 +38,8 @@ from store import Log
 
 W, H = 160, 120
 
-DASH, LIVE, FLAGS, VENDORS, LOGVIEW = 0, 1, 2, 3, 4
-N_VIEWS = 5
+BILLBOARD, DASH, LIVE, FLAGS, VENDORS, LOGVIEW = 0, 1, 2, 3, 4, 5
+N_VIEWS = 6
 
 F_ALL, F_WIFI, F_BLE = 0, 1, 2
 FILTER_NAME = ("ALL", "WIFI", "BLE")
@@ -114,7 +114,7 @@ def _note_rotating(addr):
 pending = []      # BLE addrs awaiting identification
 log = Log()
 
-view = DASH
+view = BILLBOARD
 filt = F_ALL
 cat_filter = None   # set by drilling into a dashboard row
 cat_cursor = 0
@@ -531,6 +531,62 @@ def _draw_no_database():
         screen.text(line, 8, 40 + i * 12)
 
 
+# Worn facing outward, the badge is read from a metre or two away by people
+# walking behind. Everything else in this app is designed for arm's length: at
+# 12px a capital subtends about 7 arcminutes at 2m, under the ~10 needed to
+# read at a glance. This view exists to be legible from back there, so it
+# carries one number at 60px (about 34 arcminutes) and almost nothing else.
+# Sized to the digit count rather than fixed, so a three-digit total is not
+# needlessly small just because a five-digit one has to fit.
+BILLBOARD_SIZES = (76, 66, 58, 50, 44)
+LABEL_SIZE = 19
+
+# Measured on this face: the ink starts 0.367 of the nominal size below the y
+# you pass, and is 0.767 of it tall. Positioning against the em box instead
+# clipped the digits off the top of the screen.
+INK_TOP = 0.367
+_big = None
+
+
+def _draw_billboard():
+    global _big
+    if _big is None:
+        _big = load_font("MonaSans-Medium")
+
+    total = log.wifi_count + log.ble_count
+    s = str(total)
+    screen.font = _big
+
+    size = BILLBOARD_SIZES[-1]
+    for candidate in BILLBOARD_SIZES:
+        if screen.measure_text(s, candidate)[0] <= W - 14:
+            size = candidate
+            break
+
+    w = screen.measure_text(s, size)[0]
+    # The em box sits well above the ink, hence the negative offset.
+    screen.pen = CYAN
+    screen.text(s, (W - w) / 2, 8 - size * INK_TOP, size)
+
+    # The label is set in the vector face too: at 13px it was about 8
+    # arcminutes from two metres, which is decoration rather than text.
+    label = "DEVICES SEEN"
+    lw = screen.measure_text(label, LABEL_SIZE)[0]
+    screen.pen = FG
+    screen.text(label, (W - lw) / 2, 74 - LABEL_SIZE * INK_TOP, LABEL_SIZE)
+
+    screen.font = rom_font.winds
+    alive = "%d live   %d APs" % (stats["live"], log.wifi_count)
+    screen.pen = DIM
+    screen.text(alive, (W - screen.measure_text(alive)[0]) / 2, 99)
+
+    # A slow pulse, so a glance says it is still running rather than frozen on
+    # a number from an hour ago.
+    beat = (badge.ticks // 600) % 2
+    screen.pen = GREEN if beat else color.rgb(30, 190, 120, 60)
+    screen.rectangle(6, H - 10, 7, 7)
+
+
 def _draw_dash():
     global CAT_COLOUR
     if CAT_COLOUR is None:
@@ -854,6 +910,8 @@ def update():
     if detail_open and view == LIVE and order:
         _draw_detail()
         _footer("A back")
+    elif view == BILLBOARD:
+        _draw_billboard()
     elif view == DASH:
         _draw_dash()
         _footer("A drill in   B views")

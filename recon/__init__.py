@@ -82,10 +82,13 @@ AMBER = color.rgb(246, 176, 40)
 RED = color.rgb(232, 66, 58)
 GREEN = color.rgb(30, 190, 120)
 VIOLET = color.rgb(158, 122, 244)
+PINK = color.rgb(236, 106, 178)
+TEAL = color.rgb(64, 196, 168)
 
 HEAD_BG = color.rgb(20, 30, 44)
 SEL_BG = color.rgb(255, 255, 255, 30)
-BAR_BG = color.rgb(46, 200, 224, 70)
+BAR_BG = color.rgb(46, 200, 224)
+TRACK_BG = color.rgb(255, 255, 255, 34)
 
 # ---- state ------------------------------------------------------------------
 
@@ -531,7 +534,10 @@ def _draw_no_database():
 def _draw_dash():
     global CAT_COLOUR
     if CAT_COLOUR is None:
-        CAT_COLOUR = (CYAN, VIOLET, GREEN, AMBER, CYAN, RED, AMBER, DIM)
+        # Cyan is reserved for WiFi across every view, so Access Points is
+        # the only category that gets it. Trackers and Find My are deliberately
+        # adjacent hues, being the same kind of finding.
+        CAT_COLOUR = (CYAN, VIOLET, GREEN, TEAL, PINK, RED, AMBER, DIM)
 
     counts = stats["counts"]
     _header("RECON", "%d live" % stats["live"])
@@ -550,9 +556,9 @@ def _draw_dash():
         screen.pen = CAT_COLOUR[i] if n else DIM
         screen.rectangle(cx + 5, cy + 4, 4, 12)
 
-        screen.font = rom_font.nope
+        screen.font = rom_font.smart
         screen.pen = FG if n else DIM
-        screen.text(str(n), cx + 13, cy + 1)
+        screen.text(str(n), cx + 13, cy - 1)
 
         screen.font = rom_font.winds
         screen.pen = DIM
@@ -581,16 +587,15 @@ def _draw_live():
             screen.rectangle(0, y - 1, W, ROW_H)
 
         label, _detail, tags = _label_of(kind, key)
-        accent = CYAN if kind == "W" else VIOLET
-        _signal(3, y, rssi, accent)
-
-        screen.pen = accent
-        screen.text(kind, 26, y)
+        # Cyan bars mean WiFi, violet mean Bluetooth, the same as everywhere
+        # else. A "W"/"B" letter only repeated that, and cost 9px of a name
+        # that was already being truncated.
+        _signal(3, y, rssi, CYAN if kind == "W" else VIOLET)
 
         screen.pen = _tag_colour(tags) or FG
-        if len(label) > 16:
-            label = label[:15] + "…"
-        screen.text(label, 35, y)
+        if len(label) > 18:
+            label = label[:17] + "…"
+        screen.text(label, 27, y)
 
     _scrollbar(len(order))
 
@@ -629,12 +634,14 @@ def _draw_detail():
         y += 13
 
     if tags:
+        screen.pen = DIM
+        screen.text("flags", 4, H - 25)
         screen.pen = _tag_colour(tags) or GREEN
-        screen.text(" ".join(tags)[:26], 4, H - 25)
+        screen.text(" ".join(tags)[:19], 52, H - 25)
 
 
 def _draw_flags():
-    _header("FLAGS")
+    _header("FLAGS", "%d live" % stats["live"])
     screen.font = rom_font.winds
 
     open_aps = stats["open"]
@@ -671,7 +678,7 @@ def _draw_flags():
 
 
 def _draw_vendors():
-    _header("VENDORS")
+    _header("VENDORS", "%d live" % stats["live"])
     screen.font = rom_font.winds
 
     rows = stats["vendors"]
@@ -681,20 +688,25 @@ def _draw_vendors():
         return
 
     peak = rows[0][1]
-    y = 16
+    y = 15
     for name, n in rows:
-        screen.pen = BAR_BG
-        screen.rectangle(4, y, int(152 * n / peak), 12)
         screen.pen = FG
-        screen.text(name[:18], 7, y)
+        screen.text(name[:20], 4, y)
         screen.pen = DIM
         s = str(n)
-        screen.text(s, W - screen.measure_text(s)[0] - 5, y)
+        screen.text(s, W - screen.measure_text(s)[0] - 4, y)
+
+        # Magnitude as a rule beneath the row. A filled block behind the text
+        # reads as a half-selected row at this size, not as a quantity.
+        screen.pen = TRACK_BG
+        screen.rectangle(4, y + 12, 152, 2)
+        screen.pen = BAR_BG
+        screen.rectangle(4, y + 12, max(1, int(152 * n / peak)), 2)
         y += 15
 
 
 def _draw_log():
-    _header("LOG (ALL WEEK)")
+    _header("LOG", "%d KB" % stats["log_kb"])
     screen.font = rom_font.winds
 
     mins = time.ticks_diff(time.ticks_ms(), started) // 60000
@@ -703,7 +715,7 @@ def _draw_log():
         ("access points", str(log.wifi_count), FG),
         ("ble devices", str(log.ble_count), FG),
         ("rotating", "~%d" % (len(rotating) + rotating_overflow), DIM),
-        ("tracked now", "%d" % len(ble), DIM),
+        ("bluetooth held", "%d" % len(ble), DIM),
         ("in range now", str(stats["live"]), FG),
         ("session", "%dm" % mins, DIM),
     ]

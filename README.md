@@ -73,8 +73,8 @@ No toolchain, no Python.
 
 1. Download the zip from [Releases](https://github.com/jgamblin/tufty-recon/releases).
 2. Plug the badge in and open its **Mass Storage** app. A `TUFTY` drive appears.
-3. Drag the `recon` folder into `TUFTY/apps`, then eject. On macOS you can
-   double-click `install-macos.command` instead.
+3. Open the zip's `apps` folder and drag `recon` into `TUFTY/apps`, then eject.
+   On macOS you can double-click `install-macos.command` instead.
 
 Needs badgeware firmware **v2.0.2 or newer**.
 
@@ -172,14 +172,14 @@ tools/deploy.sh
 Verify on the hardware before a conference does it for you:
 
 ```bash
-.venv/bin/mpremote connect /dev/cu.usbmodem1101 run tools/smoke.py
-.venv/bin/mpremote connect /dev/cu.usbmodem1101 run tools/stress_recon.py
+tools/run.sh tools/smoke.py          # finds the badge itself
+tools/run.sh tools/stress_recon.py
 ```
 
 `smoke.py` runs the app for 40 frames and reports failures, framerate and
 memory. `stress_recon.py` drives it at conference scale with synthetic devices,
 which is how most of the performance work got found: every view holds under
-10ms a frame up to 1800 devices.
+11ms a frame up to 1800 devices.
 
 Every screenshot here came off the hardware, not a mockup — the framebuffer is
 plain RGBA8888 and `screen.raw` exposes it:

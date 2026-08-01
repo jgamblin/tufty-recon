@@ -5,8 +5,11 @@ Append-only fixed-width binary records on the badge's internal filesystem.
 /system is read-only from MicroPython, so this lives on the ~1MB LittleFS root;
 fixed-width records keep a four-day conference comfortably inside that.
 
-    wifi  48 bytes/AP      ~3000 APs    = 144KB
-    ble   40 bytes/device  ~8000 stable = 320KB
+    wifi  45 bytes/AP      up to 4247 APs     = 186KB
+    ble   40 bytes/device  up to 9557 stable  = 373KB
+
+Both caps derive from a 560KB budget rather than being chosen by hand, so they
+stay correct if the record layout changes.
 
 Only stable BLE addresses are written. Resolvable-private addresses rotate
 every ~15 minutes, so logging them would fill the disk with one phone.

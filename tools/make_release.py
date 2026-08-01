@@ -153,9 +153,8 @@ def main():
 
     shutil.rmtree(tmp, ignore_errors=True)
     print("wrote %s" % os.path.relpath(path, ROOT))
-    print("  %d apps, %.1f KB unpacked, %.1f KB zipped"
-          % (len(apps), raw / 1024, os.path.getsize(path) / 1024))
-    print("  apps: %s" % ", ".join(apps))
+    print("  %.1f KB unpacked, %.1f KB zipped  (%s)"
+          % (raw / 1024, os.path.getsize(path) / 1024, ", ".join(apps)))
 
 
 if __name__ == "__main__":

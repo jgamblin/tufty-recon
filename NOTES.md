@@ -27,7 +27,7 @@ until that was found.
 
 A conference hall is two orders of magnitude busier than a quiet room, and the
 failure modes only appear there, so `tools/stress_recon.py` injects synthetic
-devices. Every view now holds under 10ms a frame up to 1800 devices, against a
+devices. Every view now holds under 11ms a frame up to 1800 devices, against a
 shipped live-set cap of 1200.
 
 Measured at 3000 devices, before any of this:
@@ -133,6 +133,7 @@ address bits.
 | Tool | What it does |
 | --- | --- |
 | `tools/deploy.sh` | Push recon to a connected badge via mass storage. |
+| `tools/run.sh` | Run an on-device script, locating the badge automatically. |
 | `tools/smoke.py` | Run the app for 40 frames on-device; report failures, fps, memory. |
 | `tools/stress_recon.py` | Drive it at conference scale with synthetic devices. |
 | `tools/screenshot.py` | Capture what it draws, straight off the framebuffer. |

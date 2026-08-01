@@ -91,7 +91,22 @@ BAR_BG = color.rgb(46, 200, 224, 70)
 
 wifi = {}         # bssid -> list
 ble = {}          # addr  -> list
-rotating = set()  # addresses that re-randomise; counted, not kept
+# Addresses that re-randomise. Counted, never logged as identities. Capped
+# because it is otherwise the one structure with no ceiling: a busy room
+# produces new rotating addresses indefinitely, and at roughly 45 bytes each an
+# unbounded set would outgrow the 8MB of PSRAM over a multi-day conference.
+# Past the cap the count keeps rising, it just stops storing new ones.
+MAX_ROTATING = 30_000
+rotating = set()
+rotating_overflow = 0
+
+
+def _note_rotating(addr):
+    global rotating_overflow
+    if len(rotating) < MAX_ROTATING:
+        rotating.add(addr)
+    else:
+        rotating_overflow += 1
 
 pending = []      # BLE addrs awaiting identification
 log = Log()
@@ -133,6 +148,15 @@ def _now():
 
 # ---- radios -----------------------------------------------------------------
 
+# Devices the interrupt has heard but not yet inserted. The interrupt only
+# appends here; the main loop does every insertion. Adding a key straight from
+# the interrupt could resize `ble` midway through a loop walking it, and the
+# interrupt is scheduled, so it fires between bytecodes: exactly during those
+# walks. The odds scale with how busy the room is, so it would first go wrong
+# at a conference.
+inbox = []
+
+
 def _irq(event, data):
     """Kept deliberately thin. Copying the advertising payload for a device we
     already know would allocate on every packet, and a busy room delivers
@@ -145,20 +169,29 @@ def _irq(event, data):
 
     e = ble.get(a)
     if e is not None:
+        # Rewriting slots of an existing entry cannot resize the dict, so this
+        # is safe to do from here.
         e[1] = rssi
         e[3] = now
         return
 
-    if len(ble) >= MAX_LIVE_BLE:
+    if len(ble) + len(inbox) >= MAX_LIVE_BLE:
         return
 
-    kind = ID.ble_addr_kind(addr_type, addr)
-    if kind not in ID.STABLE_KINDS:
-        rotating.add(a)
+    inbox.append((a, ID.ble_addr_kind(addr_type, addr), rssi, now, bytes(adv)))
 
-    ble[a] = [kind, rssi, _now(), now, None, "", (), None, bytes(adv),
-              ID.CAT_OTHER, None]
-    pending.append(a)
+
+def _admit_new():
+    """Move what the interrupt heard into the live set, from the main loop."""
+    while inbox:
+        a, kind, rssi, now, adv = inbox.pop()
+        if a in ble:
+            continue
+        if kind not in ID.STABLE_KINDS:
+            _note_rotating(a)
+        ble[a] = [kind, rssi, _now(), now, None, "", (), None, adv,
+                  ID.CAT_OTHER, None]
+        pending.append(a)
 
 
 ble_radio = bluetooth.BLE()
@@ -235,7 +268,7 @@ def _resolve_some():
         # Decided from the payload, not just the address bits: a Find My
         # beacon looks static by its bits but rotates every ~15 minutes.
         if ID.is_rotating(e[0], adv):
-            rotating.add(a)
+            _note_rotating(a)
         else:
             log.add_ble(a, e[0], e[1], e[7], e[2], e[4] or "")
         done += 1
@@ -478,6 +511,23 @@ def _stats_step():
         _last_pass = now
 
 
+def _draw_no_database():
+    """The most likely install mistake is copying recon/ without recon/data/,
+    which otherwise looks like a working scanner that recognises nothing."""
+    _header("RECON")
+    screen.font = rom_font.winds
+    screen.pen = RED
+    screen.text("vendor database missing", 8, 22)
+    screen.pen = DIM
+    for i, line in enumerate((
+            "recon/data/ did not come",
+            "along with the app.",
+            "",
+            "Re-copy the whole recon",
+            "folder into TUFTY/apps.")):
+        screen.text(line, 8, 40 + i * 12)
+
+
 def _draw_dash():
     global CAT_COLOUR
     if CAT_COLOUR is None:
@@ -652,7 +702,7 @@ def _draw_log():
     rows = [
         ("access points", str(log.wifi_count), FG),
         ("ble devices", str(log.ble_count), FG),
-        ("rotating", "~%d" % len(rotating), DIM),
+        ("rotating", "~%d" % (len(rotating) + rotating_overflow), DIM),
         ("tracked now", "%d" % len(ble), DIM),
         ("in range now", str(stats["live"]), FG),
         ("session", "%dm" % mins, DIM),
@@ -754,11 +804,13 @@ def update():
             wifi.clear()
             ble.clear()
             rotating.clear()
+            del inbox[:]
             wipe_start = 0
     else:
         wipe_start = 0
 
     # ---- work
+    _admit_new()
     _resolve_some()
     _stats_step()
 
@@ -781,6 +833,11 @@ def update():
     # ---- draw
     screen.pen = SLATE
     screen.clear()
+
+    if not ID.db_ready():
+        _draw_no_database()
+        _footer("HOME to exit")
+        return
 
     if detail_open and view == LIVE and order:
         _draw_detail()

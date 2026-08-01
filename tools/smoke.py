@@ -81,7 +81,7 @@ def check(name):
         gc.collect()
 
 
-print("smoke test, %d frames per app" % FRAMES)
+print("smoke test, %d frames" % FRAMES)
 failed = [name for name in APPS if not check(name)]
 print()
-print("FAILED: " + ", ".join(failed) if failed else "all apps ok")
+print("FAILED: " + ", ".join(failed) if failed else "ok")

@@ -62,6 +62,18 @@ RESOLVE_PER_FRAME = 2       # a cold vendor lookup is ~4ms; two fits in a frame
 # the room right now", which is all the live views claim to show.
 MAX_LIVE_BLE = 1200
 
+# The billboard changes only when a count changes or the pulse ticks, so
+# redrawing it 30 times a second burns the CPU for no visible gain. Sleeping
+# between frames lets the core halt on a wait-for-event instead of spinning.
+# Button latency rises to this figure, which is not noticeable in use.
+BILLBOARD_IDLE_MS = 150
+
+# Battery telemetry, so runtime is a measurement rather than a guess. One
+# sample every few minutes is negligible next to the device log.
+BATTERY_EVERY_MS = 120_000
+BATTERY_PATH = "/state/battery.csv"
+BATTERY_MAX_BYTES = 48 * 1024
+
 # Stale entries are dropped inside the same pass that computes the aggregates,
 # so the walk and its key snapshot are paid for once.
 
@@ -135,9 +147,31 @@ wifi_pending = False
 wifi_busy = False
 wipe_start = 0
 started = time.ticks_ms()
+last_battery = time.ticks_add(time.ticks_ms(), -BATTERY_EVERY_MS)
 
 wlan = network.WLAN(network.STA_IF)
 wlan.active(True)
+
+
+def _log_battery():
+    """Append one battery sample. Cheap, and it turns 'how long does it last'
+    into something measured on the actual workload."""
+    try:
+        if os.stat(BATTERY_PATH)[6] >= BATTERY_MAX_BYTES:
+            return
+    except OSError:
+        pass        # no file yet
+    try:
+        with open(BATTERY_PATH, "a") as f:
+            # Wall clock first: ticks_ms restarts at zero if the battery dies
+            # and the badge reboots, which would otherwise make an overnight
+            # run impossible to read.
+            f.write("%d,%d,%d,%d,%d,%d\n" % (
+                _now(), time.ticks_ms(), int(badge.battery_voltage() * 1000),
+                badge.battery_level(), 1 if badge.usb_connected() else 0,
+                badge.light_level()))
+    except OSError:
+        pass        # a full disk must not take the app down
 
 
 def _now():
@@ -146,7 +180,9 @@ def _now():
         t = time.time()
     except OverflowError:
         return 0        # RTC never set
-    return t if t > 1_600_000_000 else 0
+    # An unset RTC on this board reports 2021-01-01, which is comfortably
+    # past a 2020 threshold and was being accepted as a real timestamp.
+    return t if t > 1_735_689_600 else 0      # 2025-01-01
 
 
 # ---- radios -----------------------------------------------------------------
@@ -817,7 +853,7 @@ def _draw_log():
 def update():
     global view, filt, cursor, top, order, last_sort, last_wifi, last_flush
     global wifi_pending, wifi_busy, detail_open, wipe_start
-    global cat_filter, cat_cursor
+    global cat_filter, cat_cursor, last_battery
 
     now_ms = time.ticks_ms()
 
@@ -898,6 +934,10 @@ def update():
         last_flush = now_ms
         log.flush(_now())
 
+    if time.ticks_diff(now_ms, last_battery) >= BATTERY_EVERY_MS:
+        last_battery = now_ms
+        _log_battery()
+
     # ---- draw
     screen.pen = SLATE
     screen.clear()
@@ -936,6 +976,10 @@ def update():
         _wifi_scan()
         wifi_pending = False
         wifi_busy = False
+
+    if view == BILLBOARD and not detail_open:
+        # Nothing on this screen moves faster than the pulse.
+        time.sleep_ms(BILLBOARD_IDLE_MS)
 
 
 

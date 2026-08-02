@@ -128,6 +128,33 @@ in 96 minutes, 116 inside a single 10-minute window: roughly 55 real devices.
 Rotation is therefore decided from the advertisement payload as well as the
 address bits.
 
+## Battery
+
+Measured, not estimated. Left running recon on a full charge with both radios
+up and the screen lit, sampling its own voltage every two minutes:
+
+| | |
+| --- | --- |
+| Runtime | **9h 46m**, 17:57 to 03:43 |
+| Discharge | 139 mV/hour, 4163 mV down to 2793 mV |
+| Cut-out | 2793 mV |
+
+That is the heaviest configuration this thing runs, and it is not a conference
+day. Plan on a power bank.
+
+Two things that only showed up over a full night:
+
+- **The cut-out is 2793 mV, not the textbook 3300.** `battery_report.py`
+  originally assumed 3300 and reported a 9h 46m runtime as 6h 27m.
+- **The clock does not survive the battery dying.** The RTC comes back at
+  2021-01-01, so log timestamps after an unattended death are meaningless.
+  `_now()` returns 0 rather than a wrong date, so records say "unknown"
+  instead of lying, but the clock needs resetting after any full discharge.
+
+There was also one unexplained reboot at 20:05, at 3846 mV with about 70% left,
+so not a brown-out. The log de-duplicates against what is already on disk at
+startup, so it cost nothing measurable, but the cause is still unknown.
+
 ## Tooling
 
 | Tool | What it does |
@@ -140,6 +167,7 @@ address bits.
 | `tools/build_id_db.py` | Compile the IEEE and Bluetooth SIG vendor databases. |
 | `tools/export_log.py` | Pull the log off the badge as CSV. |
 | `tools/make_release.py` | Build the drag-and-drop install zip. |
+| `tools/battery_report.py` | Turn recon's voltage log into a runtime figure. |
 
 The screenshot tool is worth knowing about: the framebuffer is plain RGBA8888
 at 160x120 and `screen.raw` exposes it, so every image in this repo came off

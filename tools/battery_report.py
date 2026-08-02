@@ -22,9 +22,16 @@ import time
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir)
 MPR = os.environ.get("MPR", os.path.join(ROOT, ".venv", "bin", "mpremote"))
 
-# A single LiPo cell. The badge browns out somewhere near the bottom of this.
+# A single LiPo cell. EMPTY_MV is measured, not assumed: left to run itself
+# down, this badge kept going to 2793mV before cutting out. Using a textbook
+# 3300 under-reported a 9h 46m runtime as 6h 27m.
 FULL_MV = 4200
-EMPTY_MV = 3300
+EMPTY_MV = 2800
+
+# An unset RTC reports 1970 or 2021 depending on how it was cleared, and the
+# clock does not survive the battery dying, so samples with a nonsense date
+# would otherwise wreck the wall-time arithmetic.
+MIN_EPOCH = 1_735_689_600      # 2025-01-01
 
 
 def port():
@@ -47,9 +54,12 @@ def parse(raw):
         if len(parts) != 6:
             continue
         try:
-            rows.append(tuple(int(p) for p in parts))
+            row = tuple(int(p) for p in parts)
         except ValueError:
             continue
+        if row[0] and row[0] < MIN_EPOCH:
+            row = (0,) + row[1:]        # clock was not set; keep the sample
+        rows.append(row)
     return rows
 
 
@@ -138,9 +148,13 @@ def main():
         hhmm(total_s), -total_mv, -rate))
 
     if rate < 0:
-        remaining = (last[2] - EMPTY_MV) / -rate
+        remaining = max(0.0, (last[2] - EMPTY_MV) / -rate)
         full_life = (FULL_MV - EMPTY_MV) / -rate
-        print("at %d mV (%d%%), about %s left" % (last[2], last[3], hhmm(remaining * 3600)))
+        if last[2] <= EMPTY_MV + 50:
+            print("it ran to %d mV and cut out: that is the whole battery" % last[2])
+        else:
+            print("at %d mV (%d%%), about %s left" % (
+                last[2], last[3], hhmm(remaining * 3600)))
         print("from a full charge, roughly %s of continuous scanning" % hhmm(full_life * 3600))
         print("\nA LiPo curve is flat in the middle and steep at both ends, so a")
         print("short sample over-estimates. Trust this most after several hours.")

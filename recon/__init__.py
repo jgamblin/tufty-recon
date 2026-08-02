@@ -861,6 +861,8 @@ def update():
     if badge.pressed(BUTTON_B) and not detail_open:
         view = (view + 1) % N_VIEWS
         cursor = top = 0
+        if view == LIVE:
+            last_sort = time.ticks_add(time.ticks_ms(), -RESORT_MS)
         if view == DASH:
             cat_filter = None
             last_sort = time.ticks_add(time.ticks_ms(), -RESORT_MS)
@@ -918,7 +920,10 @@ def update():
     _resolve_some()
     _stats_step()
 
-    if time.ticks_diff(now_ms, last_sort) >= RESORT_MS:
+    # Only the live list and its detail page read `order`, so only they pay
+    # to rebuild it. The billboard runs all day and never looks at it.
+    if (view == LIVE or detail_open) \
+            and time.ticks_diff(now_ms, last_sort) >= RESORT_MS:
         last_sort = now_ms
         order = _live_rows()
         if cursor >= len(order):

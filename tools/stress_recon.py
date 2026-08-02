@@ -101,27 +101,35 @@ def bench(view, frames=25):
     return time.ticks_diff(time.ticks_ms(), t) / frames
 
 
+# Names come from the app so adding a view cannot silently shift the columns,
+# which is exactly what happened when BILLBOARD was added in front of DASH.
+VIEWS = [("BILL", m.BILLBOARD), ("DASH", m.DASH), ("LIVE", m.LIVE),
+         ("FLAGS", m.FLAGS), ("VNDRS", m.VENDORS), ("LOG", m.LOGVIEW)]
+
 print("recon stress test  (live-set cap is %d BLE)" % m.MAX_LIVE_BLE)
-print("%-14s %7s %7s %7s %7s %7s  %s" % (
-    "devices", "DASH", "LIVE", "FLAGS", "VNDRS", "LOG", "RAM"))
+print("BILL sleeps %dms a frame on purpose; it is not meant to be fast."
+      % m.BILLBOARD_IDLE_MS)
+print("%-14s %s  %s" % ("devices",
+      " ".join("%7s" % n for n, _ in VIEWS), "RAM"))
 
 for n_ble, n_wifi in LEVELS:
     synth(n_ble, n_wifi)
     gc.collect()
     before = gc.mem_free()
-    times = [bench(v) for v in range(5)]
+    times = [bench(v) for _n, v in VIEWS]
     gc.collect()
     used = (before - gc.mem_free()) // 1024
-    worst = max(times)
+    # Judge on the interactive views; the billboard's sleep is by design.
+    worst = max(t for (n, _), t in zip(VIEWS, times) if n != "BILL")
     if n_ble > m.MAX_LIVE_BLE:
         # Injected directly, bypassing the cap the interrupt enforces. Shown to
         # prove where the cliff is, not as a state the app can reach.
         flag = "  (above cap, unreachable)"
     else:
         flag = "" if worst < 34 else ("  SLOW" if worst < 100 else "  UNUSABLE")
-    print("%-14s %7.1f %7.1f %7.1f %7.1f %7.1f  %4dKB free%s" % (
-        "%d ble/%d ap" % (n_ble, n_wifi), times[0], times[1], times[2],
-        times[3], times[4], gc.mem_free() // 1024, flag))
+    print("%-14s %s  %4dKB free%s" % (
+        "%d ble/%d ap" % (n_ble, n_wifi),
+        " ".join("%7.1f" % t for t in times), gc.mem_free() // 1024, flag))
 
 print()
 print("frame budget is 16.7ms of drawing; badge.update() adds ~10ms.")

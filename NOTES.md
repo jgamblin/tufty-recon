@@ -93,13 +93,28 @@ naming conventions.
 
 ## The log on disk
 
-Fixed-width binary records on the LittleFS root: 48 bytes per access point, 40
-bytes per device.
+Length-prefixed binary records on the LittleFS root, measured at **21.7 bytes
+per access point and 26.3 per device** on live capture.
+
+They used to be fixed-width at 45 and 40, which padded the two text fields to
+32 and 26 bytes. Measured across a travel-day capture the mean SSID was 7.7
+characters and the mean device label 10, so **45% of the log was zeroes**.
+Length-prefixing roughly halves it and so roughly doubles how long a
+conference can run before the budget is reached.
+
+Each record is one length byte then the payload, after a four-byte file header
+(`RCN\x02`). The length prefix is what makes a truncated tail safe: power can
+be lost part-way through an append, and the reader stops at the first record
+whose payload is short, leaving everything before it intact and misparsing
+nothing after it. Verified by truncating a log at three different offsets: each
+lost only the cut record and raised nothing. A file without the header is
+ignored rather than read, so a log from the previous format cannot be decoded
+as confident nonsense.
 
 **It cannot fill the disk.** The root is 1024KB and shared with every other
 app's state, so recon takes a 560KB budget and stops there, never letting free
-space fall below a 64KB reserve. Record caps derive from that budget rather
-than being guessed: 4247 access points and 9557 devices, worst case 559KB.
+space fall below a 64KB reserve. The byte budget is what bounds the file; the
+record counts are now only a guard on the in-RAM de-duplication sets.
 
 The LOG view carries a capacity meter that turns amber past 75% and red at
 full, and once full it counts what it is seeing but not saving as "NOT SAVED".

@@ -27,12 +27,33 @@ ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir)
 MPR = os.environ.get("MPR", os.path.join(ROOT, ".venv", "bin", "mpremote"))
 DATA = os.path.join(ROOT, "recon", "data")
 
-WIFI_FMT = "<6sBbBI32s"
-WIFI_SIZE = struct.calcsize(WIFI_FMT)
-BLE_FMT = "<6sBbHI26s"
-BLE_SIZE = struct.calcsize(BLE_FMT)
+# Records are length-prefixed rather than fixed-width: the two text fields
+# vary enough that padding them to a fixed size was 45% of the log.
+MAGIC = b"RCN\x02"
+WIFI_HEAD = "<6sBbBI"
+WIFI_HEAD_SIZE = struct.calcsize(WIFI_HEAD)
+BLE_HEAD = "<6sBbHI"
+BLE_HEAD_SIZE = struct.calcsize(BLE_HEAD)
 NAME_LEN = 24
 NO_COMPANY = 0xFFFF
+
+
+def records(blob, head_fmt, head_size):
+    """Walk a length-prefixed log. Stops cleanly at a truncated tail rather
+    than misparsing everything after it."""
+    if not blob.startswith(MAGIC):
+        raise ValueError(
+            "not a recon v2 log (missing header). An older fixed-width log "
+            "cannot be read by this version.")
+    i, n = len(MAGIC), len(blob)
+    while i < n:
+        ln = blob[i]
+        i += 1
+        if ln < head_size or i + ln > n:
+            return          # truncated tail
+        body = blob[i:i + ln]
+        i += ln
+        yield struct.unpack(head_fmt, body[:head_size]), body[head_size:]
 
 SECURITY = {0: "OPEN", 1: "WEP", 2: "WPA", 3: "WPA2", 4: "WPA/2", 5: "WPA2",
             6: "WPA3", 7: "WPA2/3"}
@@ -111,7 +132,10 @@ def pull(p, remote, local):
 def stamp(epoch):
     if not epoch:
         return ""
-    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(epoch))
+    # The badge's RTC holds local wall time, so its "epoch" is already local
+    # seconds. gmtime reads that back as the clock it was set to; localtime
+    # would shift every timestamp by the host's timezone offset.
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(epoch))
 
 
 def main():
@@ -134,8 +158,8 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         wifi_raw = os.path.join(tmp, "w.bin")
         ble_raw = os.path.join(tmp, "b.bin")
-        got_wifi = pull(p, "/state/recon_wifi.bin", wifi_raw)
-        got_ble = pull(p, "/state/recon_ble.bin", ble_raw)
+        got_wifi = pull(p, "/state/recon_ap.bin", wifi_raw)
+        got_ble = pull(p, "/state/recon_dev.bin", ble_raw)
 
         if not got_wifi and not got_ble:
             sys.exit("No log on the badge. Run the recon app first.")
@@ -149,12 +173,11 @@ def main():
                 w = csv.writer(f)
                 w.writerow(["bssid", "ssid", "channel", "security", "vendor",
                             "virtual_bssid", "rssi_first_seen", "first_seen"])
-                for i in range(0, len(data) - WIFI_SIZE + 1, WIFI_SIZE):
-                    bssid, chan, rssi, sec, first, ssid = struct.unpack(
-                        WIFI_FMT, data[i:i + WIFI_SIZE])
+                for (bssid, chan, rssi, sec, first), ssid in records(
+                        data, WIFI_HEAD, WIFI_HEAD_SIZE):
                     w.writerow([
                         ":".join("%02X" % b for b in bssid),
-                        ssid.rstrip(b"\x00").decode("utf-8", "replace"),
+                        ssid.decode("utf-8", "replace"),
                         chan, SECURITY.get(sec, str(sec)),
                         vendor(oui, bssid), "yes" if bssid[0] & 0x02 else "no",
                         rssi, stamp(first),
@@ -169,23 +192,22 @@ def main():
                 w = csv.writer(f)
                 w.writerow(["address", "address_kind", "label", "company",
                             "mac_vendor", "rssi_first_seen", "first_seen"])
-                for i in range(0, len(data) - BLE_SIZE + 1, BLE_SIZE):
-                    addr, kind, rssi, company, first, label = struct.unpack(
-                        BLE_FMT, data[i:i + BLE_SIZE])
+                for (addr, kind, rssi, company, first), label in records(
+                        data, BLE_HEAD, BLE_HEAD_SIZE):
                     comp = ""
                     if company != NO_COMPANY:
                         comp = btco.lookup(struct.pack(">H", company))
                     w.writerow([
                         ":".join("%02X" % b for b in addr),
                         ADDR_KIND[kind] if kind < len(ADDR_KIND) else str(kind),
-                        label.rstrip(b"\x00").decode("utf-8", "replace"),
+                        label.decode("utf-8", "replace"),
                         comp, vendor(oui, addr), rssi, stamp(first),
                     ])
                     n_ble += 1
             print("wrote %s  (%d bluetooth devices)" % (os.path.relpath(path, ROOT), n_ble))
 
     if args.erase:
-        for f in ("/state/recon_wifi.bin", "/state/recon_ble.bin",
+        for f in ("/state/recon_ap.bin", "/state/recon_dev.bin",
                   "/state/recon_meta.bin"):
             subprocess.run([MPR, "connect", p, "fs", "rm", ":" + f],
                            capture_output=True)

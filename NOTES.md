@@ -159,6 +159,34 @@ Tile, and four public-address devices — with the other 383 counted as rotating
 which is what they were. Applied to an airport concourse the same rules keep
 473 of 1200, because a concourse really is full of public-address hardware.
 
+## Advertisement floods
+
+People spam Continuity advertisements at conferences to pop pairing dialogs on
+nearby phones: hundreds a second, each from a fresh random address. Every one
+looks to this app like a brand-new device, and it locked the display up.
+
+The mechanism was not the volume itself but where it landed. `_admit_new()`
+drained its whole queue every frame, so a flood meant up to a thousand dict
+insertions plus payload copies inside a single frame.
+
+Two defences, because either alone leaves a hole:
+
+- **Admission is capped per frame**, flood or not. An unbounded drain is a
+  latent stall no matter what fills the queue.
+- **The interrupt stops queueing once a flood is detected**, so it does not
+  even copy the payloads. Entry at 60 new addresses/second, exit at 20, with
+  the gap between them stopping a busy-but-normal room from oscillating.
+
+Being flooded is reported rather than merely survived: the billboard shows
+`BLE FLOOD n/sec` and the flags page counts what was dropped. At a conference
+that is a finding worth seeing.
+
+The log needs no protection here. Flood addresses are Continuity beacons, which
+the rotation rules already refuse to count as devices.
+
+`tools/flood_recon.py` drives the app's own interrupt at a chosen rate so the
+defence can be measured rather than assumed.
+
 ## Battery
 
 Measured, not estimated. Left running recon on a full charge with both radios
@@ -194,6 +222,7 @@ startup, so it cost nothing measurable, but the cause is still unknown.
 | `tools/run.sh` | Run an on-device script, locating the badge automatically. |
 | `tools/smoke.py` | Run the app for 40 frames on-device; report failures, fps, memory. |
 | `tools/stress_recon.py` | Drive it at conference scale with synthetic devices. |
+| `tools/flood_recon.py` | Simulate a BLE advertisement flood against it. |
 | `tools/screenshot.py` | Capture what it draws, straight off the framebuffer. |
 | `tools/build_id_db.py` | Compile the IEEE and Bluetooth SIG vendor databases. |
 | `tools/export_log.py` | Pull the log off the badge as CSV. |

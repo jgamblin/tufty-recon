@@ -64,6 +64,22 @@ RESOLVE_PER_FRAME = 2       # a cold vendor lookup is ~4ms; two fits in a frame
 # the room right now", which is all the live views claim to show.
 MAX_LIVE_BLE = 1200
 
+# BLE advertisement floods are a thing people do at conferences: a spammer
+# throws out hundreds of advertisements a second, each from a fresh random
+# address, to pop up pairing dialogs on nearby phones. Every one of those looks
+# to this app like a brand-new device.
+#
+# Two defences. The interrupt stops queueing once a flood is detected, so it
+# never spends the frame budget copying payloads for addresses that will never
+# be seen twice. And admission is capped per frame regardless, because draining
+# an unbounded queue in one frame is what locked the display up.
+#
+# Hysteresis on entry and exit so a busy-but-normal room does not oscillate.
+ADMIT_PER_FRAME = 12
+FLOOD_WINDOW_MS = 1000
+FLOOD_ENTER = 60            # new addresses/second
+FLOOD_EXIT = 20
+
 # The billboard changes only when a count changes or the pulse ticks, so
 # redrawing it 30 times a second burns the CPU for no visible gain. Sleeping
 # between frames lets the core halt on a wait-for-event instead of spinning.
@@ -149,6 +165,12 @@ wifi_pending = False
 wifi_busy = False
 wipe_start = 0
 started = time.ticks_ms()
+
+flood = False
+flood_rate = 0              # new addresses/second, last full window
+flood_seen = 0
+flood_dropped = 0
+flood_window = time.ticks_ms()
 last_battery = time.ticks_add(time.ticks_ms(), -BATTERY_EVERY_MS)
 
 wlan = network.WLAN(network.STA_IF)
@@ -202,6 +224,7 @@ def _irq(event, data):
     """Kept deliberately thin. Copying the advertising payload for a device we
     already know would allocate on every packet, and a busy room delivers
     hundreds a second."""
+    global flood_seen, flood_dropped
     if event != _IRQ_SCAN_RESULT:
         return
     addr_type, addr, _adv_type, rssi, adv = data
@@ -216,6 +239,14 @@ def _irq(event, data):
         e[3] = now
         return
 
+    flood_seen += 1
+    if flood:
+        # Count it and drop it. Not even the payload copy: under a flood these
+        # are all fresh random addresses that will never be seen again, and
+        # queueing them is what starves the display.
+        flood_dropped += 1
+        return
+
     if len(ble) + len(inbox) >= MAX_LIVE_BLE:
         return
 
@@ -223,8 +254,14 @@ def _irq(event, data):
 
 
 def _admit_new():
-    """Move what the interrupt heard into the live set, from the main loop."""
-    while inbox:
+    """Move what the interrupt heard into the live set, from the main loop.
+
+    Capped per frame: draining the whole queue at once is what a flood turned
+    into a locked-up display.
+    """
+    done = 0
+    while inbox and done < ADMIT_PER_FRAME:
+        done += 1
         a, kind, rssi, now, adv = inbox.pop()
         if a in ble:
             continue
@@ -614,12 +651,20 @@ def _draw_billboard():
     screen.text(label, (W - lw) / 2, 74 - LABEL_SIZE * INK_TOP, LABEL_SIZE)
 
     screen.font = rom_font.winds
-    # Rotating addresses are shown alongside, so a small device count does not
-    # read as "nothing here" when the air is actually busy.
-    alive = "%d live  %d rotating" % (
-        stats["live"], len(rotating) + rotating_overflow)
-    screen.pen = DIM
-    screen.text(alive, (W - screen.measure_text(alive)[0]) / 2, 99)
+    if flood:
+        # Being spammed is a finding, not just a condition to survive.
+        msg = "BLE FLOOD  %d/sec" % flood_rate
+        screen.pen = RED
+        screen.rectangle(0, 96, W, 13)
+        screen.pen = SLATE
+        screen.text(msg, (W - screen.measure_text(msg)[0]) / 2, 97)
+    else:
+        # Rotating addresses are shown alongside, so a small device count does
+        # not read as "nothing here" when the air is actually busy.
+        alive = "%d live  %d rotating" % (
+            stats["live"], len(rotating) + rotating_overflow)
+        screen.pen = DIM
+        screen.text(alive, (W - screen.measure_text(alive)[0]) / 2, 99)
 
     # A slow pulse, so a glance says it is still running rather than frozen on
     # a number from an hour ago.
@@ -791,6 +836,7 @@ def _draw_flags():
         ("possible twins", len(evil), AMBER if evil else GREEN),
         ("trackers", trackers, AMBER if trackers else GREEN),
         ("find my", findmy, DIM),
+        ("ble flood /sec", flood_rate, RED if flood else GREEN),
     )
     y = 16
     for name, n, col in rows:
@@ -801,7 +847,10 @@ def _draw_flags():
         y += 13
 
     # Name the most interesting twin; a count alone is not actionable.
-    if evil:
+    if flood:
+        screen.pen = RED
+        screen.text("FLOODING: %d dropped" % flood_dropped, 8, y + 4)
+    elif evil:
         ssid = list(evil.keys())[0]
         why, count = evil[ssid]
         screen.pen = AMBER
@@ -898,6 +947,7 @@ def update():
     global view, filt, cursor, top, order, last_sort, last_wifi, last_flush
     global wifi_pending, wifi_busy, detail_open, wipe_start
     global cat_filter, cat_cursor, last_battery
+    global flood, flood_rate, flood_seen, flood_window
 
     now_ms = time.ticks_ms()
 
@@ -958,6 +1008,19 @@ def update():
             wipe_start = 0
     else:
         wipe_start = 0
+
+    # ---- flood state, once a second
+    if time.ticks_diff(now_ms, flood_window) >= FLOOD_WINDOW_MS:
+        elapsed = time.ticks_diff(now_ms, flood_window)
+        flood_rate = flood_seen * 1000 // max(1, elapsed)
+        if flood:
+            if flood_rate < FLOOD_EXIT:
+                flood = False
+        elif flood_rate >= FLOOD_ENTER:
+            flood = True
+            del inbox[:]        # whatever is queued is already spam
+        flood_seen = 0
+        flood_window = now_ms
 
     # ---- work
     _admit_new()

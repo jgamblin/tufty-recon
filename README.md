@@ -168,6 +168,12 @@ worse than none on a tool for spotting rogue hardware.
 vendors, but unrecovered virtual BSSIDs would each look like a distinct unknown
 vendor and flag every multi-SSID home router. Only identified vendors count.
 
+**Advertisement floods.** Spamming Continuity advertisements to pop pairing
+dialogs on nearby phones is a conference pastime, and every one of those looks
+like a brand-new device. Admission is capped per frame, and past 60 new
+addresses a second the interrupt stops queueing them at all. The billboard
+shows `BLE FLOOD n/sec` instead, because being flooded is worth knowing.
+
 **Radio contention.** WiFi and BLE share one radio. With BLE holding a
 continuous scan, `wlan.scan()` still returns access points but every RSSI comes
 back as **0**. The BLE listen is paused for the couple of seconds a WiFi scan

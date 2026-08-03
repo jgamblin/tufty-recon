@@ -459,9 +459,23 @@ def is_apple_continuity(adv):
 
 def has_identity(adv):
     """True when the payload carries something that could name this device
-    again after its address changes: a name, a company, or a service."""
-    return bool(adv.get("name") or adv.get("company") is not None
-                or adv.get("services") or adv.get("svc_data"))
+    again after its address changes.
+
+    A bare service UUID does not qualify. Rotating stacks advertise plenty of
+    them, and one we cannot resolve to a name leaves the device labelled by its
+    own address, which is the thing that is about to change. Only a name, a
+    company, or a service we can actually name counts."""
+    if adv.get("name"):
+        return True
+    if adv.get("company") is not None:
+        return True
+    for uuid in adv.get("services", ()):
+        if uuid in SERVICE:
+            return True
+    for uuid, _blob in adv.get("svc_data", ()):
+        if uuid in SERVICE:
+            return True
+    return False
 
 
 def is_rotating(kind, adv):

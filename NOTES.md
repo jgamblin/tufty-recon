@@ -136,12 +136,28 @@ Address kinds, from the top bits of the first octet:
 | resolvable private | ~15 min | no |
 | non-resolvable private | yes | no |
 
-The exception is what real data turned up. Apple's Find My beacons derive their
-address from a rotating key but advertise it as *static random*, so by the bits
-they look permanent. One two-hour outing logged 356 distinct Find My addresses
-in 96 minutes, 116 inside a single 10-minute window: roughly 55 real devices.
-Rotation is therefore decided from the advertisement payload as well as the
-address bits.
+Static random is the hard case, and it took three passes against real captures
+to get right. By the bits it looks permanent; in practice it is what most
+privacy-rotating stacks advertise from.
+
+- **Apple Find My.** A two-hour outing logged 356 distinct Find My addresses in
+  96 minutes, 116 inside a single 10-minute window: roughly 55 real devices.
+- **The rest of Apple Continuity.** An overnight capture in a hotel room logged
+  99 addresses labelled "AirPods". That is a handful of earbuds
+  re-randomising, not 99 pairs in adjacent rooms. The whole Continuity suite
+  rotates, not just Find My.
+- **Anything advertising no identity at all.** The same night logged a
+  near-constant 20 new bare addresses every hour, 05:00 included, from a badge
+  sitting still in one room. Real devices would show a day/night curve. And an
+  address with no name, company or service cannot be re-identified later even
+  in principle, so counting it as a device makes the number mean nothing.
+
+A static-random address is therefore counted as a device only when the payload
+carries something that could name it again and does not belong to a rotating
+scheme. Applied to that hotel night, 389 "devices" became 6 — a fitness band, a
+Tile, and four public-address devices — with the other 383 counted as rotating,
+which is what they were. Applied to an airport concourse the same rules keep
+473 of 1200, because a concourse really is full of public-address hardware.
 
 ## Battery
 
@@ -183,6 +199,9 @@ startup, so it cost nothing measurable, but the cause is still unknown.
 | `tools/export_log.py` | Pull the log off the badge as CSV. |
 | `tools/make_release.py` | Build the drag-and-drop install zip. |
 | `tools/battery_report.py` | Turn recon's voltage log into a runtime figure. |
+
+The SHARE view carries a QR to the repository and the URL written out, for
+answering "what is that?" without handing over the badge.
 
 The screenshot tool is worth knowing about: the framebuffer is plain RGBA8888
 at 160x120 and `screen.raw` exposes it, so every image in this repo came off

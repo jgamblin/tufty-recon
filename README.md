@@ -88,6 +88,7 @@ Needs badgeware firmware **v2.0.2 or newer**.
 | **FLAGS** | Open networks, WEP, possible evil twins, trackers, Find My. |
 | **VENDORS** | Who makes the hardware in this room. |
 | **LOG** | The persistent tally, and how full the log is. |
+| **SHARE** | A QR to this repository and the URL, for when someone asks. |
 
 **B** next view · **A** drill in / detail / back · **UP/DOWN** scroll ·
 **C** clear filter or cycle wifi/ble · **HOME** back to the launcher
@@ -135,6 +136,13 @@ the same databases, so the CSV stands alone.
 **Bluetooth address rotation.** Phones and watches re-randomise their address
 roughly every 15 minutes, so only stable addresses count as devices and
 rotating ones are reported as an inflated upper bound.
+
+A static-random address counts as a device only if its payload carries a name,
+a company or a service, and does not belong to a rotating scheme. Everything
+Apple advertises over Continuity rotates, and an address that advertises no
+identity at all cannot be re-identified later even in principle. Skipping that
+test turned one overnight capture in a single hotel room into 389 "devices",
+of which 6 were real.
 
 The address bits alone are not enough to decide this, which only became clear
 with real data. Apple's Find My beacons derive their address from a key that

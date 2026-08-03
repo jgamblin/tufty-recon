@@ -13,6 +13,7 @@ databases a phone hides from you.
   FLAGS    open networks, WEP, possible evil twins, Find My beacons
   VENDORS  who makes the hardware in this room
   LOG      the persistent all-week tally
+  SHARE    a QR and the URL, for when someone asks what it is
 
   B      next view          A      drill in / open detail / back
   UP/DN  scroll             C      clear filter, or cycle wifi/ble
@@ -26,6 +27,7 @@ Holding UP+DOWN together for two seconds on LOG erases the log.
 import bluetooth
 import network
 import os
+import qrcode
 import sys
 import time
 
@@ -38,8 +40,8 @@ from store import Log
 
 W, H = 160, 120
 
-BILLBOARD, DASH, LIVE, FLAGS, VENDORS, LOGVIEW = 0, 1, 2, 3, 4, 5
-N_VIEWS = 6
+BILLBOARD, DASH, LIVE, FLAGS, VENDORS, LOGVIEW, SHARE = 0, 1, 2, 3, 4, 5, 6
+N_VIEWS = 7
 
 F_ALL, F_WIFI, F_BLE = 0, 1, 2
 FILTER_NAME = ("ALL", "WIFI", "BLE")
@@ -612,7 +614,10 @@ def _draw_billboard():
     screen.text(label, (W - lw) / 2, 74 - LABEL_SIZE * INK_TOP, LABEL_SIZE)
 
     screen.font = rom_font.winds
-    alive = "%d live   %d APs" % (stats["live"], log.wifi_count)
+    # Rotating addresses are shown alongside, so a small device count does not
+    # read as "nothing here" when the air is actually busy.
+    alive = "%d live  %d rotating" % (
+        stats["live"], len(rotating) + rotating_overflow)
     screen.pen = DIM
     screen.text(alive, (W - screen.measure_text(alive)[0]) / 2, 99)
 
@@ -621,6 +626,45 @@ def _draw_billboard():
     beat = (badge.ticks // 600) % 2
     screen.pen = GREEN if beat else color.rgb(30, 190, 120, 60)
     screen.rectangle(6, H - 10, 7, 7)
+
+
+REPO_URL = "https://github.com/jgamblin/tufty-recon"
+REPO_TEXT = "github.com/jgamblin"
+REPO_TEXT2 = "/tufty-recon"
+_qr = None
+
+
+def _draw_share():
+    """Someone asks what the thing on your bag is. This is the answer, at
+    arm's length: a code they can scan and the URL written out for when a
+    camera will not focus or a phone is in a pocket."""
+    global _qr
+    if _qr is None:
+        _qr = qrcode.QRCode()
+        _qr.set_text(REPO_URL)
+
+    n = _qr.get_size()[0]
+    scale = 3
+    span = n * scale
+    ox, oy = (W - span) / 2, 4
+
+    # Quiet zone stays white whatever the theme; scanners need the border.
+    screen.pen = color.rgb(255, 255, 255)
+    screen.rectangle(ox - 4, oy - 4, span + 8, span + 8)
+    screen.pen = color.rgb(0, 0, 0)
+    for qy in range(n):
+        for qx in range(n):
+            if _qr.get_module(qx, qy):
+                screen.rectangle(ox + qx * scale, oy + qy * scale, scale, scale)
+
+    # Two lines: the whole URL on one is about 180px against a 160px screen.
+    screen.font = rom_font.winds
+    y = oy + span + 4
+    for line, pen in ((REPO_TEXT, FG), (REPO_TEXT2, CYAN)):
+        w = screen.measure_text(line)[0]
+        screen.pen = pen
+        screen.text(line, (W - w) / 2, y)
+        y += 11
 
 
 def _draw_dash():
@@ -970,9 +1014,11 @@ def update():
     elif view == VENDORS:
         _draw_vendors()
         _footer("B next")
-    else:
+    elif view == LOGVIEW:
         _draw_log()
         _footer("UP+DN erase")
+    else:
+        _draw_share()
 
     if wifi_pending:
         # Show the marker before the scan blocks for a couple of seconds.

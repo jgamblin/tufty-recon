@@ -448,22 +448,53 @@ def is_find_my(adv):
             and adv["mfg"][0] == 0x12)
 
 
+def is_apple_continuity(adv):
+    """Any of Apple's Continuity advertisements.
+
+    The whole suite is built on privacy-rotating addresses, so a Continuity
+    beacon never identifies a device for longer than its rotation period.
+    """
+    return adv.get("company") == APPLE and bool(adv.get("mfg"))
+
+
+def has_identity(adv):
+    """True when the payload carries something that could name this device
+    again after its address changes: a name, a company, or a service."""
+    return bool(adv.get("name") or adv.get("company") is not None
+                or adv.get("services") or adv.get("svc_data"))
+
+
 def is_rotating(kind, adv):
     """True when this address will not identify the device again later.
 
-    The address bits are not sufficient on their own. Apple's Find My beacons
-    derive their address from a key that rotates about every 15 minutes, but
-    they present as *static random*, which by the bits alone looks permanent.
+    The address bits are not sufficient on their own, and this took two
+    corrections against real data to get right.
 
-    Measured on a two-hour trip downtown: 356 distinct Find My addresses
-    arrived in 96 minutes, 116 of them inside a single 10-minute window. That
-    is roughly 55 real devices rotating, not 356. Logging them as stable
-    inflated the device count more than sixfold and filled the log with
-    addresses that will never be seen again.
+    A public address is burned into the hardware and never rotates. Resolvable
+    and non-resolvable private addresses always do. The hard case is *static
+    random*, which by the bits looks permanent but is what Apple advertises
+    Continuity from: an overnight capture logged 99 distinct addresses labelled
+    "AirPods", which is a handful of earbuds re-randomising, not 99 pairs in
+    adjacent rooms. An earlier two-hour capture did the same with 356 Find My
+    addresses that were roughly 55 devices.
+
+    A static-random address that advertises *nothing* is the other half of the
+    same problem. Overnight in a hotel room the badge logged a near-constant 20
+    new such addresses every hour, 05:00 included, which is not a stationary
+    room meeting new devices; it is privacy rotation. And an address with no
+    payload cannot be re-identified later even in principle, so counting it as
+    a device makes the number mean nothing.
+
+    So a static-random address counts as a device only when the payload gives
+    some way to know it again, and does not belong to a rotating scheme.
     """
+    if kind == PUBLIC:
+        return False        # burned into the hardware; never rotates
     if kind not in STABLE_KINDS:
         return True
-    return bool(is_find_my(adv))
+    if is_apple_continuity(adv):
+        return True
+    return not has_identity(adv)
 
 
 # ---- WiFi -------------------------------------------------------------------

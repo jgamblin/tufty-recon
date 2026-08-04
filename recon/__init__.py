@@ -701,7 +701,11 @@ def _draw_billboard():
 
     # The label is set in the vector face too: at 13px it was about 8
     # arcminutes from two metres, which is decoration rather than text.
-    label = "DEVICES SEEN"
+    #
+    # "RADIOS", not "DEVICES": the number above is access points plus
+    # Bluetooth devices, and on one capture 703 of 1,748 were access points.
+    # This is the view strangers read, so the caption has to be true.
+    label = "RADIOS SEEN"
     lw = screen.measure_text(label, LABEL_SIZE)[0]
     screen.pen = FG
     screen.text(label, (W - lw) / 2, 74 - LABEL_SIZE * INK_TOP, LABEL_SIZE)

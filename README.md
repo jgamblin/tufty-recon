@@ -126,6 +126,14 @@ python3 tools/export_log.py            # -> exports/recon-<date>-{wifi,ble}.csv
 python3 tools/export_log.py --erase    # and clear the badge
 ```
 
+Over a multi-day conference, export and erase each night. The badge
+de-duplicates against what is already on disk, which is right for one capture
+but flattens a week into a single blob: an access point passed on Monday and
+again on Wednesday is only ever recorded once, on Monday. A clean log each
+morning keeps the days separable, and `tools/merge_week.py` puts them back
+together afterwards, normalising older days to the current counting rules and
+emitting an aggregate-only summary to write from.
+
 The badge stores fixed-width binary records to fit a four-day conference in a
 1MB filesystem, taking a bounded 560KB slice and saying so on screen when full
 rather than silently dropping records. The exporter resolves vendors against

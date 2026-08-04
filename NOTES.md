@@ -281,6 +281,8 @@ startup, so it cost nothing measurable, but the cause is still unknown.
 | `tools/smoke.py` | Run the app for 40 frames on-device; report failures, fps, memory. |
 | `tools/stress_recon.py` | Drive it at conference scale with synthetic devices. |
 | `tools/flood_recon.py` | Simulate a BLE advertisement flood against it. |
+| `tools/verify_rotation.py` | Check the rotation and rogue-AP rules on-device. |
+| `tools/merge_week.py` | Stitch nightly exports into one week, with a publishable summary. |
 | `tools/screenshot.py` | Capture what it draws, straight off the framebuffer. |
 | `tools/build_id_db.py` | Compile the IEEE and Bluetooth SIG vendor databases. |
 | `tools/export_log.py` | Pull the log off the badge as CSV. |

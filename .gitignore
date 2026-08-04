@@ -11,3 +11,4 @@ exports/
 *.raw
 
 .DS_Store
+exports/week/

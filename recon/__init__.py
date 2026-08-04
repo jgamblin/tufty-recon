@@ -141,6 +141,47 @@ def _note_rotating(addr):
     else:
         rotating_overflow += 1
 
+
+# A label only identifies a device if it tells that device apart from the next
+# one. identify.py can only see one advertisement at a time, so it cannot know
+# that "T-Dongle Biscuit" arrived from 66 different addresses in a quarter of
+# an hour; that is one spammer, and the name is the least useful thing about
+# it. Counting how many random addresses have worn each label catches the
+# general case, including schemes nobody has added to ROTATING_SERVICES yet.
+#
+# Public addresses are exempt and never counted here. They are burned into the
+# hardware, so 271 machines all labelled "Matsushita Electronic" really are 271
+# machines, and demoting them on a shared label would throw away a casino floor.
+LABEL_SHARE_MAX = 8
+MAX_LABELS = 4000
+label_shares = {}
+label_demoted = 0
+
+# WEP access points on invented MAC addresses. One or two could be junk; a
+# handful is somebody running a rogue-AP rig.
+KARMA_MIN = 3
+
+
+def _label_discriminates(label):
+    """Record one more random address wearing this label, and say whether the
+    label still tells devices apart. Demotion is one-way for the session."""
+    global label_demoted
+    if not label:
+        return False
+    n = label_shares.get(label)
+    if n is None:
+        if len(label_shares) >= MAX_LABELS:
+            return True     # out of room to judge; trust the label
+        label_shares[label] = 1
+        return True
+    if n > LABEL_SHARE_MAX:
+        return False
+    label_shares[label] = n + 1
+    if n + 1 > LABEL_SHARE_MAX:
+        label_demoted += 1
+        return False
+    return True
+
 pending = []      # BLE addrs awaiting identification
 log = Log()
 
@@ -345,7 +386,15 @@ def _resolve_some():
         e[8] = None  # drop the payload; it is the biggest part of the record
         # Decided from the payload, not just the address bits: a Find My
         # beacon looks static by its bits but rotates every ~15 minutes.
+        #
+        # The second test is the one that does not need to know the scheme:
+        # a random address whose label is already worn by a crowd of other
+        # random addresses is one device rotating, whoever built it. This is
+        # also what keeps a slow flood out of the log, since a spammer under
+        # the flood threshold still reaches this line.
         if ID.is_rotating(e[0], adv):
+            _note_rotating(a)
+        elif e[0] != ID.PUBLIC and not _label_discriminates(e[4]):
             _note_rotating(a)
         else:
             log.add_ble(a, e[0], e[1], e[7], e[2], e[4] or "")
@@ -494,7 +543,7 @@ STATS_CHUNK = 300
 STATS_EVERY_MS = 2000
 
 stats = {"counts": [0] * ID.N_CATS, "findmy": 0, "open": 0, "wep": 0,
-         "trackers": 0, "vendors": [], "log_kb": 0, "log_use": 0.0,
+         "karma": 0, "trackers": 0, "vendors": [], "log_kb": 0, "log_use": 0.0,
          "live": 0}
 
 _acc = None
@@ -526,7 +575,7 @@ def _stats_step():
         if time.ticks_diff(now, _last_pass) < STATS_EVERY_MS:
             return
         _acc = {"counts": [0] * ID.N_CATS, "findmy": 0, "open": 0, "wep": 0,
-                "trackers": 0, "vendors": {},
+                "karma": 0, "trackers": 0, "vendors": {},
                 # Two os.stat calls; cheap once a pass, 20ms a frame otherwise.
                 "log_kb": log.bytes_used() // 1024, "log_use": log.usage(),
                 "live": 0}
@@ -554,6 +603,13 @@ def _stats_step():
                 _acc["open"] += 1
             elif e[3] == 1:
                 _acc["wep"] += 1
+                # WEP has been broken since 2001 and ships on nothing current,
+                # so a WEP beacon from an invented MAC is not old hardware. A
+                # karma rig beacons a stock list of hotspot names to see who
+                # bites; one BSides capture had 77 of these across all 13
+                # channels, 76 of them locally administered.
+                if ID.is_locally_administered(_acc_w[i]):
+                    _acc["karma"] += 1
         else:
             key = _acc_b[i - n_w]
             e = ble.get(key)
@@ -827,6 +883,7 @@ def _draw_flags():
 
     open_aps = stats["open"]
     wep_aps = stats["wep"]
+    karma = stats["karma"]
     trackers = stats["trackers"]
     findmy = stats["findmy"]
 
@@ -846,17 +903,21 @@ def _draw_flags():
         screen.text(str(n), 120, y)
         y += 13
 
-    # Name the most interesting twin; a count alone is not actionable.
+    # Name the most interesting finding; a count alone is not actionable.
+    # Exactly one line fits between the last row and the footer bar at H-11,
+    # so the loudest finding wins and says everything on that line. A second
+    # line here draws underneath the footer text.
     if flood:
         screen.pen = RED
         screen.text("FLOODING: %d dropped" % flood_dropped, 8, y + 4)
+    elif karma >= KARMA_MIN:
+        screen.pen = RED
+        screen.text("KARMA RIG: %d fake APs" % karma, 8, y + 4)
     elif evil:
         ssid = list(evil.keys())[0]
-        why, count = evil[ssid]
+        _why, count = evil[ssid]
         screen.pen = AMBER
-        screen.text(ssid[:18], 8, y + 4)
-        screen.pen = DIM
-        screen.text("%s, %d APs" % (why, count), 8, y + 14)
+        screen.text("twin? %s x%d" % (ssid[:12], count), 8, y + 4)
     else:
         screen.pen = DIM
         screen.text("find my = phones too", 8, y + 4)
@@ -947,7 +1008,7 @@ def update():
     global view, filt, cursor, top, order, last_sort, last_wifi, last_flush
     global wifi_pending, wifi_busy, detail_open, wipe_start
     global cat_filter, cat_cursor, last_battery
-    global flood, flood_rate, flood_seen, flood_window
+    global flood, flood_rate, flood_seen, flood_window, label_demoted
 
     now_ms = time.ticks_ms()
 
@@ -1004,6 +1065,8 @@ def update():
             wifi.clear()
             ble.clear()
             rotating.clear()
+            label_shares.clear()
+            label_demoted = 0
             del inbox[:]
             wipe_start = 0
     else:

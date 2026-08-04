@@ -19,7 +19,10 @@ import random
 import sys
 import time
 
-RATES = (0, 30, 120, 400, 900)     # advertisements per second to inject
+# Advertisements injected per frame. Not per second: the billboard deliberately
+# sleeps, so frames are ~6/s and a per-second target would silently deliver a
+# fraction of itself. The achieved rate is measured and reported instead.
+PER_FRAME = (0, 2, 6, 20, 60)
 FRAMES = 40
 
 _cap = []
@@ -61,12 +64,12 @@ def spam(n):
 
 print("flood defence check  (enter %d/s, exit %d/s, admit %d/frame)"
       % (m.FLOOD_ENTER, m.FLOOD_EXIT, m.ADMIT_PER_FRAME))
-print("%-12s %10s %8s %9s %8s" % ("injected", "ms/frame", "flood", "tracked", "dropped"))
+print("%-11s %9s %9s %7s %8s %8s" % (
+    "per frame", "achieved", "ms/frame", "flood", "tracked", "dropped"))
 
-for rate in RATES:
+for per_frame in PER_FRAME:
     m.view = m.BILLBOARD
-    per_frame = rate // 30 if rate else 0
-    for _ in range(6):                 # settle, and let flood state latch
+    for _ in range(8):                 # settle, and let flood state latch
         spam(per_frame)
         badge.poll()
         update()
@@ -76,9 +79,11 @@ for rate in RATES:
         spam(per_frame)
         badge.poll()
         update()
-    ms = time.ticks_diff(time.ticks_ms(), t) / FRAMES
-    print("%-12s %9.1f %8s %9d %8d" % (
-        "%d/s" % rate, ms, "YES" if m.flood else "no",
+    span = time.ticks_diff(time.ticks_ms(), t)
+    ms = span / FRAMES
+    achieved = per_frame * FRAMES * 1000 // max(1, span)
+    print("%-11d %8d/s %8.1f %7s %8d %8d" % (
+        per_frame, achieved, ms, "YES" if m.flood else "no",
         len(m.ble), m.flood_dropped - before))
 
 print()

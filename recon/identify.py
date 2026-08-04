@@ -228,6 +228,15 @@ TRACKERS = {
     0xFD84: "Tile",
 }
 
+# Pairing and proximity schemes that re-randomise the address they advertise
+# from. Every one of these carries something that looks like an identity (a
+# company ID, a named service), so without this table each re-randomisation
+# reads as a brand-new device.
+ROTATING_SERVICES = {
+    0xFE2C,     # Google Fast Pair, Android's answer to Swift Pair
+    0xFD6F,     # Exposure Notification, rotates every 10-20 min by design
+}
+
 # GAP appearance, top 10 bits are the category.
 APPEARANCE = {
     1: "Phone", 2: "Computer", 3: "Watch", 4: "Clock", 5: "Display",
@@ -457,6 +466,31 @@ def is_apple_continuity(adv):
     return adv.get("company") == APPLE and bool(adv.get("mfg"))
 
 
+def is_rotating_scheme(adv):
+    """True when the payload belongs to a pairing or proximity scheme that
+    re-randomises its address.
+
+    Apple was the first of these to show up in a capture, but it is not
+    special: Microsoft's Connected Devices Platform (the beacon behind the
+    Windows "add a device" popup) and Google's Fast Pair rotate exactly the
+    same way, and all three advertise a company ID or a named service, so
+    every one of them satisfies has_identity(). A BSides capture logged 153
+    addresses announcing Swift Pair inside fifteen minutes, which was one
+    spammer, and 16 more announcing Fast Pair.
+    """
+    if is_apple_continuity(adv):
+        return True
+    if adv.get("company") == MICROSOFT and adv.get("mfg"):
+        return True
+    for uuid in adv.get("services", ()):
+        if uuid in ROTATING_SERVICES:
+            return True
+    for uuid, _blob in adv.get("svc_data", ()):
+        if uuid in ROTATING_SERVICES:
+            return True
+    return False
+
+
 def has_identity(adv):
     """True when the payload carries something that could name this device
     again after its address changes.
@@ -506,7 +540,7 @@ def is_rotating(kind, adv):
         return False        # burned into the hardware; never rotates
     if kind not in STABLE_KINDS:
         return True
-    if is_apple_continuity(adv):
+    if is_rotating_scheme(adv):
         return True
     return not has_identity(adv)
 

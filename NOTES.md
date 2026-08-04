@@ -151,6 +151,12 @@ privacy-rotating stacks advertise from.
   sitting still in one room. Real devices would show a day/night curve. And an
   address with no name, company or service cannot be re-identified later even
   in principle, so counting it as a device makes the number mean nothing.
+- **Apple is not special.** Microsoft's Connected Devices Platform, the beacon
+  behind the Windows "add a device" popup, and Google's Fast Pair rotate the
+  same way and carry a company ID or a named service, so both cleared every
+  test above. A BSides floor logged 153 addresses announcing Swift Pair inside
+  fifteen minutes. `ROTATING_SERVICES` and a check on the Microsoft company ID
+  put them in the same bucket as Continuity.
 
 A static-random address is therefore counted as a device only when the payload
 carries something that could name it again and does not belong to a rotating
@@ -158,6 +164,28 @@ scheme. Applied to that hotel night, 389 "devices" became 6 — a fitness band, 
 Tile, and four public-address devices — with the other 383 counted as rotating,
 which is what they were. Applied to an airport concourse the same rules keep
 473 of 1200, because a concourse really is full of public-address hardware.
+
+### A label has to discriminate
+
+Naming each rotating scheme is a treadmill, and the Swift Pair miss is what it
+costs. So there is a second rule underneath, which needs to know nothing about
+any vendor: **count how many random addresses have worn each label, and stop
+believing a label once too many have.**
+
+`has_identity()` only ever asked whether a payload carries a name, never
+whether that name tells this device apart from the next one. Sixty-six
+addresses all calling themselves "T-Dongle Biscuit" are one ESP32 dongle, and
+the name is the least informative thing about it. Past `LABEL_SHARE_MAX` shared
+labels the badge stops counting new wearers as devices.
+
+Public addresses are exempt and never counted toward a label's share. They are
+burned into the hardware, so 271 machines all labelled "Matsushita Electronic"
+really are 271 machines. Demoting on a shared label alone would have thrown
+away an entire casino floor — the same capture where the rule was needed.
+
+Together the two rules take that BSides day from 1,045 logged addresses to 810,
+drop 167 to the scheme table and 68 to the share rule, and leave all 672 public
+addresses untouched.
 
 ## Advertisement floods
 
@@ -181,11 +209,41 @@ Being flooded is reported rather than merely survived: the billboard shows
 `BLE FLOOD n/sec` and the flags page counts what was dropped. At a conference
 that is a finding worth seeing.
 
-The log needs no protection here. Flood addresses are Continuity beacons, which
-the rotation rules already refuse to count as devices.
+**This protects the display, not the log**, and an earlier version of this file
+claimed otherwise: that flood addresses were Continuity beacons the rotation
+rules already rejected, so the log needed no defence of its own. A BSides
+capture disproved it. That spammer used *Microsoft* Swift Pair, which sailed
+straight through, and 235 phantom records reached the disk.
+
+The rate is why these are two separate problems. That burst ran at roughly 0.25
+new addresses a second, nowhere near the 60/second that latches flood mode,
+because it did not need to be fast to work: stalling a display takes volume,
+but polluting a log only takes patience. Anything under the threshold reaches
+the identification path untouched, so **the log's defence has to be
+identity-based rather than rate-based**, which is what the two rules in the
+previous section are for.
 
 `tools/flood_recon.py` drives the app's own interrupt at a chosen rate so the
 defence can be measured rather than assumed.
+
+## Rogue access points
+
+WEP has been broken since 2001 and ships on nothing current, so a WEP beacon is
+already odd. A WEP beacon from a *locally administered* MAC is not old hardware
+at all: the address was invented in software, and something is pretending to be
+an access point.
+
+The BSides floor had 77 of them, 76 locally administered, spread across all 13
+channels, advertising 40 different SSIDs. The names are the giveaway — the
+stock target list of a karma rig, mixing ISP defaults from six countries
+(`KPN Fon`, `SKY`, `Virgin Media`, `Telekom_FON`, `Ziggo`, `SFR WiFi Mobile`)
+with the free-WiFi names phones join without prompting (`Google Starbucks`,
+`McDonald's Free WiFi`, `Airport Free WiFi`, `eduroam`).
+
+`WEP AND locally-administered` is the whole heuristic, and past `KARMA_MIN` the
+flags page names it. This was the most interesting thing the badge saw all day
+and it was invisible until the log came off as CSV, which is the argument for
+putting it on screen.
 
 ## Battery
 

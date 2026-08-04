@@ -85,7 +85,7 @@ Needs badgeware firmware **v2.0.2 or newer**.
 | **BILLBOARD** | One big number, readable from a couple of metres. For wearing it facing outward. |
 | **DASH** | What is around you, counted by kind. Pick a row, press **A** to see only those. |
 | **LIVE** | Everything in range, strongest first. **A** opens a detail page. |
-| **FLAGS** | Open networks, WEP, possible evil twins, trackers, Find My. |
+| **FLAGS** | Open networks, WEP, rogue APs, possible evil twins, trackers, Find My. |
 | **VENDORS** | Who makes the hardware in this room. |
 | **LOG** | The persistent tally, and how full the log is. |
 | **SHARE** | A QR to this repository and the URL, for when someone asks. |
@@ -139,10 +139,18 @@ rotating ones are reported as an inflated upper bound.
 
 A static-random address counts as a device only if its payload carries a name,
 a company or a service, and does not belong to a rotating scheme. Everything
-Apple advertises over Continuity rotates, and an address that advertises no
-identity at all cannot be re-identified later even in principle. Skipping that
-test turned one overnight capture in a single hotel room into 389 "devices",
-of which 6 were real.
+Apple advertises over Continuity rotates, as do Microsoft Swift Pair and Google
+Fast Pair, and an address that advertises no identity at all cannot be
+re-identified later even in principle. Skipping that test turned one overnight
+capture in a single hotel room into 389 "devices", of which 6 were real.
+
+Naming each scheme is a treadmill, so a second rule sits underneath that needs
+to know nothing about any vendor: **a label only counts as identity while it
+still tells devices apart.** Sixty-six random addresses all calling themselves
+"T-Dongle Biscuit" are one dongle, so past a handful of shared labels the badge
+stops counting new wearers. Public addresses are exempt, because they are
+burned into the hardware and 271 machines with identical labels really are 271
+machines.
 
 The address bits alone are not enough to decide this, which only became clear
 with real data. Apple's Find My beacons derive their address from a key that
@@ -168,11 +176,23 @@ worse than none on a tool for spotting rogue hardware.
 vendors, but unrecovered virtual BSSIDs would each look like a distinct unknown
 vendor and flag every multi-SSID home router. Only identified vendors count.
 
-**Advertisement floods.** Spamming Continuity advertisements to pop pairing
-dialogs on nearby phones is a conference pastime, and every one of those looks
-like a brand-new device. Admission is capped per frame, and past 60 new
-addresses a second the interrupt stops queueing them at all. The billboard
-shows `BLE FLOOD n/sec` instead, because being flooded is worth knowing.
+**Advertisement floods.** Spamming pairing advertisements to pop dialogs on
+nearby phones is a conference pastime, and every one of those looks like a
+brand-new device. Admission is capped per frame, and past 60 new addresses a
+second the interrupt stops queueing them at all. The billboard shows
+`BLE FLOOD n/sec` instead, because being flooded is worth knowing.
+
+That defends the display. The log needs its own defence, because a spammer does
+not have to be fast to pollute it: one BSides burst ran at a fortieth of the
+flood threshold and still put 235 phantom devices on disk. Keeping those out is
+a question of identity, not rate, which is what the two rules above do.
+
+**Rogue access points.** WEP has been broken since 2001 and ships on nothing
+current, so a WEP beacon from a locally-administered (invented) MAC is not old
+hardware, it is something pretending to be an access point. That same BSides
+floor had 77, across all 13 channels, advertising the stock target list of a
+karma rig: ISP defaults from six countries plus the free-WiFi names phones join
+without prompting. The flags page names it on screen.
 
 **Radio contention.** WiFi and BLE share one radio. With BLE holding a
 continuous scan, `wlan.scan()` still returns access points but every RSSI comes

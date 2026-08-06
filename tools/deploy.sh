@@ -99,6 +99,69 @@ find "$VOL" -name '._*' -delete 2>/dev/null || true
 find "$VOL" -name '.DS_Store' -delete 2>/dev/null || true
 sync
 
+# Verify against the volume before ejecting. A copy onto a stale mount left by
+# an earlier run, or a partial write, otherwise reports success and leaves the
+# badge running the previous build. That has happened twice, and both times it
+# was found by noticing a constant had not changed.
+if ! diff -r recon "$VOL/apps/recon" >/dev/null 2>&1; then
+  echo "Copy did not land: $VOL/apps/recon differs from ./recon" >&2
+  diff -rq recon "$VOL/apps/recon" >&2 || true
+  exit 1
+fi
+echo "Verified on the volume."
+
 echo "Ejecting (the badge will reboot into the launcher)..."
 eject_volume "$VOL"
+
+# And verify again once it is back, because the check above can be satisfied by
+# the page cache while the eject fails to flush to the card.
+if [[ -n "$MPR" && -x "$MPR" ]]; then
+  echo "Waiting for the badge to come back..."
+  PORT=""
+  for _ in $(seq 1 30); do
+    sleep 1
+    # `|| true` is load-bearing twice over. While the badge is still rebooting
+    # grep matches nothing and exits 1, which `pipefail` turns into a failed
+    # assignment and `set -e` turns into a silent exit — the exact failure this
+    # whole verification block exists to catch. And the test must not be the
+    # loop's last command, or a final miss makes the loop itself return 1.
+    PORT="${TUFTY_PORT:-$("$MPR" devs 2>/dev/null | grep -i -m1 'tufty' | cut -d' ' -f1 || true)}"
+    if [[ -n "$PORT" ]]; then
+      break
+    fi
+  done
+  if [[ -z "$PORT" ]]; then
+    echo "Badge did not re-enumerate, so the install could not be confirmed." >&2
+    echo "Re-run once it is back on USB." >&2
+    exit 1
+  fi
+  # Sum the bytes of every deployed source file and compare. Sizes alone would
+  # miss an edit that happens to preserve length, which is exactly the shape of
+  # a changed threshold. Both sides sum and count the same bytes, so the order
+  # files are visited in does not matter.
+  GOT="$("$MPR" connect "$PORT" exec "
+import os
+def walk(d):
+    for e in sorted(os.listdir(d)):
+        p = d + '/' + e
+        if os.stat(p)[0] & 0x4000:
+            for q in walk(p): yield q
+        elif e.endswith('.py'):
+            yield p
+n = 0
+data = bytearray()
+for p in walk('/system/apps/recon'):
+    b = open(p, 'rb').read()
+    data.extend(b); n += len(b)
+print(sum(data), n)
+" 2>/dev/null | tr -d '\r' | tail -1)"
+  WANT="$(find recon -name '*.py' | sort | xargs cat | \
+          python3 -c "import sys; d=sys.stdin.buffer.read(); print(sum(d), len(d))")"
+  if [[ "$GOT" != "$WANT" ]]; then
+    echo "Install did not stick: the badge reports [$GOT], expected [$WANT]." >&2
+    echo "The eject probably beat the flush. Re-run the deploy." >&2
+    exit 1
+  fi
+  echo "Confirmed on the badge: $GOT"
+fi
 echo "Done."

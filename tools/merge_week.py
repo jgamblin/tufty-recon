@@ -46,12 +46,25 @@ ROTATING_LABELS = (
 # tells devices apart; past this many random addresses wearing it, it does not.
 LABEL_SHARE_MAX = 8
 
+# Mirrors recon._now(). A badge whose battery goes flat comes back with its RTC
+# reset, and an unset RTC on this board reports 2021-01-01 rather than failing,
+# which is a plausible enough date to be counted as a real day. The badge has
+# refused anything before 2025 since that was found; exports taken earlier still
+# carry the bogus stamps, so the same floor is applied here rather than letting
+# a 2020 day appear in the report.
+CLOCK_FLOOR = datetime.date(2025, 1, 1)
+
 
 def day_of(stamp):
     """The capture day a timestamp belongs to, or None if the clock was lost."""
     if not stamp or not stamp[0].isdigit():
         return None
-    t = datetime.datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S")
+    try:
+        t = datetime.datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    if t.date() < CLOCK_FLOOR:
+        return None
     return (t - datetime.timedelta(hours=DAY_START_HOUR)).date().isoformat()
 
 
@@ -60,24 +73,75 @@ def load(path):
         return list(csv.DictReader(fh))
 
 
-def find_days(root, since):
+def undated_resolver(specs):
+    """Build name -> day for records that were captured with no clock.
+
+    Clock loss happens per capture, not per week: one export can be entirely
+    undated while another holds a single stranded record from a different day.
+    A bare date therefore applies to everything, and `SUBSTRING=date` applies
+    only to matching filenames, so two separate outages can be filed correctly
+    in one run. First matching spec wins; anything unmatched stays uncounted.
+    """
+    rules = []
+    for spec in specs or ():
+        match, _, day = spec.rpartition("=")
+        try:
+            datetime.date.fromisoformat(day)
+        except ValueError:
+            sys.exit("--undated wants [FILE=]YYYY-MM-DD, got %r" % spec)
+        rules.append((match, day))
+
+    def resolve(name):
+        for match, day in rules:
+            if not match or match in name:
+                return day
+        return None
+    return resolve
+
+
+def find_days(root, since, undated_for=None):
     """Group every exported record by the day it was actually captured.
 
     Deliberately keyed on first_seen rather than the export filename: an
     export taken at 06:51 holds the previous day's capture.
+
+    Two things the raw exports make easy to get wrong:
+
+    Re-exporting a capture before erasing leaves overlapping files, and two
+    exports of the same day put every device in that day twice. The per-day
+    counts doubled without the week totals moving, which is the hard version of
+    the bug to notice. Each day therefore keeps one row per identifier.
+
+    A badge whose battery died has no clock, so its records carry no day at
+    all. Those used to be dropped here in silence, which quietly cost a whole
+    day of collection. They are counted per file and returned so the caller can
+    say so, and `undated_for` attributes them to a day the operator knows.
     """
-    wifi, ble = collections.defaultdict(list), collections.defaultdict(list)
+    wifi, ble = collections.defaultdict(dict), collections.defaultdict(dict)
+    undated = collections.Counter()
+    placed = {}
     files = 0
     for name in sorted(os.listdir(root)):
         if not name.startswith("recon-") or not name.endswith(".csv"):
             continue
-        bucket = ble if name.endswith("-ble.csv") else wifi
+        is_ble = name.endswith("-ble.csv")
+        bucket, key = (ble, "address") if is_ble else (wifi, "bssid")
+        assumed = undated_for(name) if undated_for else None
         files += 1
         for row in load(os.path.join(root, name)):
             day = day_of(row.get("first_seen", ""))
-            if day and (since is None or day >= since):
-                bucket[day].append(row)
-    return wifi, ble, files
+            if day is None:
+                undated[name] += 1
+                if assumed is None:
+                    continue
+                placed[name] = assumed
+                day = assumed
+            if since is None or day >= since:
+                # First sighting wins, matching merge() below.
+                bucket[day].setdefault(row[key], row)
+    return ({d: list(v.values()) for d, v in wifi.items()},
+            {d: list(v.values()) for d, v in ble.items()},
+            files, undated, placed)
 
 
 def normalise_ble(rows):
@@ -155,12 +219,20 @@ def main():
     ap.add_argument("--dir", default="exports", help="where the daily exports are")
     ap.add_argument("--from", dest="since", metavar="YYYY-MM-DD",
                     help="ignore days before this")
+    ap.add_argument("--undated", action="append", metavar="[FILE=]YYYY-MM-DD",
+                    help="attribute records captured with no clock to this day. "
+                         "A badge whose battery went flat comes back with its "
+                         "RTC reset and logs without timestamps; the day they "
+                         "belong to is something only you know. Repeatable, and "
+                         "FILE= scopes it to matching filenames when two "
+                         "separate outages are in play.")
     ap.add_argument("--out", default="exports/week", help="where to write the report")
     args = ap.parse_args()
 
     if not os.path.isdir(args.dir):
         sys.exit("no such directory: %s" % args.dir)
-    wifi_days, ble_days, files = find_days(args.dir, args.since)
+    wifi_days, ble_days, files, undated, placed = find_days(
+        args.dir, args.since, undated_resolver(args.undated))
     if not wifi_days and not ble_days:
         sys.exit("no exported records found in %s" % args.dir)
 
@@ -197,6 +269,12 @@ def main():
             "returning_devices": sum(1 for r in B if r["days_seen"] > 1),
         },
         "normalised_out": dict(dropped),
+        "undated": {
+            "records": sum(undated.values()),
+            "uncounted": sum(n for f, n in undated.items() if f not in placed),
+            "attributed": placed,
+            "by_file": dict(undated),
+        },
         "per_day": {
             d: {"access_points": len(wifi_days.get(d, [])),
                 "devices": len(ble_days.get(d, []))} for d in days
@@ -232,6 +310,16 @@ def main():
         print("normalised out of older exports (rules that did not exist yet):")
         for why, n in dropped.most_common():
             print("  %5d  %s" % (n, why))
+        print()
+    if undated:
+        stranded = sum(n for name, n in undated.items() if name not in placed)
+        print("captured with no clock (the badge's RTC was unset):")
+        for name, n in sorted(undated.items()):
+            where = placed.get(name)
+            print("  %5d  %-34s %s" % (
+                n, name, "-> " + where if where else "NOT COUNTED"))
+        if stranded:
+            print("  attribute the uncounted ones with --undated FILE=YYYY-MM-DD")
         print()
     print("seen on more than one day: %d APs, %d devices"
           % (summary["totals"]["returning_access_points"],

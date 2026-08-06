@@ -202,8 +202,41 @@ Two defences, because either alone leaves a hole:
 - **Admission is capped per frame**, flood or not. An unbounded drain is a
   latent stall no matter what fills the queue.
 - **The interrupt stops queueing once a flood is detected**, so it does not
-  even copy the payloads. Entry at 60 new addresses/second, exit at 20, with
-  the gap between them stopping a busy-but-normal room from oscillating.
+  even copy the payloads.
+
+### What counts as "new" is the whole problem
+
+The first version of this measured novelty against the live set: any address
+not currently tracked counted toward the rate, every time it advertised. That
+is advertisement volume, not address novelty, and a real device advertises
+several times a second forever. Fifty honest devices read as 507/second.
+
+It was also a one-way door. Under flood the interrupt admits nothing, so the
+live set goes stale and empties, and against an empty set *every* device in
+the room looks new on *every* advertisement. The measured rate climbed as the
+room drained. Entry was self-fulfilling and exit was unreachable, so collection
+stayed dead until the app was restarted by hand. That happened four times in
+one day at BSides before the battery log gave it away: capture and the
+two-minute battery heartbeat went silent in the same windows, with USB
+connected and the voltage flat, which ruled out everything else.
+
+So novelty now lives in its own set of recently-heard addresses, deliberately
+independent of the live set, in two generations rotated at `SEEN_CAP` to bound
+memory. A real device enters it once and is familiar from then on however often
+it speaks and whether or not it is still tracked; a spammer's addresses are new
+every time by construction. Draining the live set can no longer corrupt the
+measurement, which is what makes exit reachable at all.
+
+Entry also has to persist for `FLOOD_CONFIRM` consecutive windows, because
+walking into a full hall genuinely does present hundreds of unfamiliar
+addresses in one second.
+
+The thresholds are measured rather than chosen. **41 unfamiliar addresses a
+second already drags a frame out to 1.47 seconds**, so the old entry point of
+60 sat above the point where the badge was already unusable and was only ever
+reached by the inflated counter. Entry is 15/second and exit 5; for scale, the
+busiest honest hour ever captured on this badge, an airport concourse, averaged
+0.17 unfamiliar addresses a second.
 
 Being flooded is reported rather than merely survived: the billboard shows
 `BLE FLOOD n/sec` and the flags page counts what was dropped. At a conference
@@ -281,6 +314,8 @@ startup, so it cost nothing measurable, but the cause is still unknown.
 | `tools/smoke.py` | Run the app for 40 frames on-device; report failures, fps, memory. |
 | `tools/stress_recon.py` | Drive it at conference scale with synthetic devices. |
 | `tools/flood_recon.py` | Simulate a BLE advertisement flood against it. |
+| `tools/busy_room.py` | Check that a crowded honest room is not read as a flood. |
+| `tools/flood_recovery.py` | Check that a latched flood clears once the spammer leaves. |
 | `tools/verify_rotation.py` | Check the rotation and rogue-AP rules on-device. |
 | `tools/merge_week.py` | Stitch nightly exports into one week, with a publishable summary. |
 | `tools/screenshot.py` | Capture what it draws, straight off the framebuffer. |

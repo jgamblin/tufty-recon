@@ -8,10 +8,15 @@ Bluetooth SIG tables the badge uses, so the CSV is readable without the badge.
 
     python3 tools/export_log.py                 # -> exports/recon-<date>.csv
     python3 tools/export_log.py --out /tmp/x    # writes x-wifi.csv, x-ble.csv
-    python3 tools/export_log.py --keep          # leave the log on the badge
+    python3 tools/export_log.py --erase         # and clear the badge
 
 By default the log is left alone; --erase clears it after a successful export,
 for starting a fresh day.
+
+Records carry the badge's clock at first sighting. If the battery went flat the
+RTC comes back unset, the badge writes 0 rather than a wrong time, and
+first_seen is empty: tell merge_week.py which day those belong to with
+--undated.
 """
 
 import argparse

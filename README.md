@@ -186,9 +186,18 @@ vendor and flag every multi-SSID home router. Only identified vendors count.
 
 **Advertisement floods.** Spamming pairing advertisements to pop dialogs on
 nearby phones is a conference pastime, and every one of those looks like a
-brand-new device. Admission is capped per frame, and past 60 new addresses a
-second the interrupt stops queueing them at all. The billboard shows
-`BLE FLOOD n/sec` instead, because being flooded is worth knowing.
+brand-new device. Admission is capped per frame, and past 15 unfamiliar
+addresses a second the interrupt stops queueing them at all. The billboard
+shows `BLE FLOOD n/sec` instead, because being flooded is worth knowing.
+
+**Unfamiliar**, not merely untracked, and the difference is the whole thing. An
+earlier version counted any address not currently in the live set, every time
+it advertised, which is advertisement volume rather than address novelty: fifty
+honest devices read as 507 a second. Worse, latching drained the live set, and
+against an empty set every device in the room looked new again, so the rate
+rose as the room emptied and the flood could never clear. Novelty is now
+tracked in its own recently-heard set, independent of what is being displayed,
+so a crowded room reads as crowded and a flood clears when the spammer leaves.
 
 That defends the display. The log needs its own defence, because a spammer does
 not have to be fast to pollute it: one BSides burst ran at a fortieth of the

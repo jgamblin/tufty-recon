@@ -74,11 +74,36 @@ MAX_LIVE_BLE = 1200
 # be seen twice. And admission is capped per frame regardless, because draining
 # an unbounded queue in one frame is what locked the display up.
 #
-# Hysteresis on entry and exit so a busy-but-normal room does not oscillate.
+# What counts as "new" is the whole difficulty, and getting it wrong took the
+# badge down four times in one day at BSides. The rate used to be measured
+# against the live set: anything not currently tracked counted, every time it
+# advertised. That is advertisement volume, not address novelty, and the two
+# are nothing alike — fifty real devices re-advertising four times a second
+# read as 500/second and latched it.
+#
+# It could then never let go. Under flood the interrupt admits nothing, so the
+# live set goes stale and empties, and with it empty *every* device in the room
+# looks new on every single advertisement. The measured rate climbed as the
+# room drained. Entry was self-fulfilling and exit was unreachable.
+#
+# So novelty is tracked separately from the live set, in a set of addresses
+# heard recently. A real device enters it once and stops counting no matter how
+# often it speaks; a spammer's addresses are new every time by construction.
+# Two generations, rotated when the newer fills, bound the memory while keeping
+# roughly the last SEEN_CAP addresses of history.
 ADMIT_PER_FRAME = 12
 FLOOD_WINDOW_MS = 1000
-FLOOD_ENTER = 60            # new addresses/second
-FLOOD_EXIT = 20
+# Measured, not chosen: 41 unfamiliar addresses a second already drags a frame
+# out to 1.47 seconds, so a threshold of 60 sat above the point where the badge
+# was useless and could only ever be reached by the old, inflated counter. For
+# scale, the busiest honest hour ever captured on this badge — an airport
+# concourse — averaged 0.17 unfamiliar addresses a second.
+FLOOD_ENTER = 15
+FLOOD_EXIT = 5
+# Walking into a full hall really can present hundreds of unfamiliar addresses
+# in one second, so entry has to persist rather than fire on a single window.
+FLOOD_CONFIRM = 3
+SEEN_CAP = 3000
 
 # The billboard changes only when a count changes or the pulse ticks, so
 # redrawing it 30 times a second burns the CPU for no visible gain. Sleeping
@@ -208,10 +233,18 @@ wipe_start = 0
 started = time.ticks_ms()
 
 flood = False
-flood_rate = 0              # new addresses/second, last full window
+flood_rate = 0              # unfamiliar addresses/second, last full window
 flood_seen = 0
 flood_dropped = 0
 flood_window = time.ticks_ms()
+flood_hot = 0               # consecutive windows over FLOOD_ENTER
+
+# Addresses heard recently, kept apart from the live set so that pruning or
+# draining `ble` cannot make familiar devices look new again. Two generations:
+# when the newer one fills it becomes the older and a fresh one starts, which
+# bounds memory at 2 * SEEN_CAP without ever clearing all history at once.
+seen_new = set()
+seen_old = set()
 last_battery = time.ticks_add(time.ticks_ms(), -BATTERY_EVERY_MS)
 
 wlan = network.WLAN(network.STA_IF)
@@ -280,7 +313,16 @@ def _irq(event, data):
         e[3] = now
         return
 
-    flood_seen += 1
+    # Novelty, not volume. A device already heard from recently is familiar
+    # however often it speaks, and stays familiar even after the live set has
+    # pruned it. Only an address in neither generation counts toward the rate.
+    if a not in seen_new and a not in seen_old:
+        flood_seen += 1
+        # The main loop only ever rebinds these names, never iterates them, so
+        # adding here cannot disturb a walk in progress. A rotation landing
+        # between the test and the add just misfiles one address.
+        seen_new.add(a)
+
     if flood:
         # Count it and drop it. Not even the payload copy: under a flood these
         # are all fresh random addresses that will never be seen again, and
@@ -971,6 +1013,13 @@ def _draw_log():
     ]
     if log.unsaved:
         rows.append(("NOT SAVED", str(log.unsaved), RED))
+    if not _now():
+        # A flat battery resets the RTC, and every record logged afterwards
+        # carries no timestamp. The capture itself is fine, but nothing can
+        # place it on a day, so merge_week has no day to file it under and a
+        # whole conference day drops out of the report. Cheap to notice here,
+        # expensive to discover a week later.
+        rows.append(("NO CLOCK", "unset", RED))
     y = 15
     for name, val, col in rows:
         screen.pen = DIM
@@ -1013,6 +1062,7 @@ def update():
     global wifi_pending, wifi_busy, detail_open, wipe_start
     global cat_filter, cat_cursor, last_battery
     global flood, flood_rate, flood_seen, flood_window, label_demoted
+    global flood_hot, seen_new, seen_old
 
     now_ms = time.ticks_ms()
 
@@ -1071,6 +1121,9 @@ def update():
             rotating.clear()
             label_shares.clear()
             label_demoted = 0
+            seen_new.clear()
+            seen_old.clear()
+            flood_hot = 0
             del inbox[:]
             wipe_start = 0
     else:
@@ -1080,14 +1133,28 @@ def update():
     if time.ticks_diff(now_ms, flood_window) >= FLOOD_WINDOW_MS:
         elapsed = time.ticks_diff(now_ms, flood_window)
         flood_rate = flood_seen * 1000 // max(1, elapsed)
+        if flood_rate >= FLOOD_ENTER:
+            flood_hot += 1
+        else:
+            flood_hot = 0
         if flood:
+            # Exit is reachable now only because the rate is measured against
+            # addresses heard recently rather than against the live set: a room
+            # the badge has stopped admitting still reads as familiar.
             if flood_rate < FLOOD_EXIT:
                 flood = False
-        elif flood_rate >= FLOOD_ENTER:
+        elif flood_hot >= FLOOD_CONFIRM:
             flood = True
             del inbox[:]        # whatever is queued is already spam
         flood_seen = 0
         flood_window = now_ms
+
+        # Rotate the novelty history once the newer generation fills, so the
+        # badge remembers roughly the last SEEN_CAP addresses without the set
+        # growing all conference.
+        if len(seen_new) >= SEEN_CAP:
+            seen_old = seen_new
+            seen_new = set()
 
     # ---- work
     _admit_new()

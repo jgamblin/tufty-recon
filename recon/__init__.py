@@ -239,6 +239,27 @@ flood_dropped = 0
 flood_window = time.ticks_ms()
 flood_hot = 0               # consecutive windows over FLOOD_ENTER
 
+# The BLE listen has to be paused for every WiFi scan, because the two share
+# one radio, and then re-armed. Re-arming can fail, and the failure used to be
+# swallowed: the app kept running, the screen kept updating, and the badge
+# quietly never heard another advertisement for the rest of the session. At one
+# WiFi scan every 20 seconds that is a few thousand chances a day for a single
+# transient error to end collection.
+#
+# So the scan is now treated as something that can die and must be revived.
+# Silence is the check that does not depend on trusting the return value: any
+# room has some Bluetooth traffic, so hearing nothing at all for this long
+# means the listen is gone, whatever the API reported.
+BLE_SILENCE_MS = 45_000
+SCAN_RETRY_MS = 10_000
+ble_scanning = True
+last_adv = time.ticks_ms()
+last_scan_try = time.ticks_ms()
+scan_restarts = 0
+
+frame_start = time.ticks_ms()
+last_frame_ms = 0
+
 # Addresses heard recently, kept apart from the live set so that pruning or
 # draining `ble` cannot make familiar devices look new again. Two generations:
 # when the newer one fills it becomes the older and a fresh one starts, which
@@ -251,23 +272,45 @@ wlan = network.WLAN(network.STA_IF)
 wlan.active(True)
 
 
-def _log_battery():
-    """Append one battery sample. Cheap, and it turns 'how long does it last'
-    into something measured on the actual workload."""
+def _log_battery(frame_ms=0):
+    """Append one health sample: power, and what the app was doing at the time.
+
+    This is the only record of what the badge was doing when nobody was
+    watching, and it is what identified the flood latch. It is deliberately
+    more than battery now, because a stall that leaves no trace costs a day of
+    conference to diagnose and there is only one conference.
+    """
     try:
         if os.stat(BATTERY_PATH)[6] >= BATTERY_MAX_BYTES:
-            return
+            # Rotate rather than stop. Stopping is silent, and this file went
+            # quiet at 48KB on the one day its data was most needed: a whole
+            # day of stalls with no heartbeat to localise them. One generation
+            # back is kept, so the cap still bounds the space used.
+            try:
+                os.remove(BATTERY_PATH + ".1")
+            except OSError:
+                pass
+            try:
+                os.rename(BATTERY_PATH, BATTERY_PATH + ".1")
+            except OSError:
+                return      # could not rotate; better to skip than to grow
     except OSError:
         pass        # no file yet
     try:
         with open(BATTERY_PATH, "a") as f:
             # Wall clock first: ticks_ms restarts at zero if the battery dies
             # and the badge reboots, which would otherwise make an overnight
-            # run impossible to read.
-            f.write("%d,%d,%d,%d,%d,%d\n" % (
+            # run impossible to read. ticks_ms second, because comparing the
+            # two is what tells a reboot from a hang.
+            f.write("%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n" % (
                 _now(), time.ticks_ms(), int(badge.battery_voltage() * 1000),
                 badge.battery_level(), 1 if badge.usb_connected() else 0,
-                badge.light_level()))
+                badge.light_level(),
+                # App state, so the next stall does not need a live badge to
+                # explain it: was it flooding, was it hearing anything, was it
+                # drawing slowly, and had the radio needed reviving.
+                1 if flood else 0, flood_rate, len(ble), frame_ms,
+                scan_restarts, 1 if ble_scanning else 0))
     except OSError:
         pass        # a full disk must not take the app down
 
@@ -298,12 +341,15 @@ def _irq(event, data):
     """Kept deliberately thin. Copying the advertising payload for a device we
     already know would allocate on every packet, and a busy room delivers
     hundreds a second."""
-    global flood_seen, flood_dropped
+    global flood_seen, flood_dropped, last_adv
     if event != _IRQ_SCAN_RESULT:
         return
     addr_type, addr, _adv_type, rssi, adv = data
     a = bytes(addr)
     now = time.ticks_ms()
+    # Proof of life for the radio, and the only such proof there is: everything
+    # else the app does keeps working perfectly while the listen is dead.
+    last_adv = now
 
     e = ble.get(a)
     if e is not None:
@@ -361,22 +407,60 @@ ble_radio.irq(_irq)
 ble_radio.gap_scan(0, 30000, 30000, True)
 
 
-def _wifi_scan():
-    global evil
-    # The cyw43 shares one radio between WiFi and BLE. With BLE holding a
-    # continuous scan, wlan.scan() still returns APs but every RSSI comes back
-    # as 0, so the listen has to be paused for the duration.
+def _ensure_ble_scan(now):
+    """Bring the BLE listen back if it has died.
+
+    Two triggers, because neither alone is enough. The flag catches a re-arm
+    that raised, which is the failure that can be detected honestly. Silence
+    catches the rest: a call that returned success but left the radio not
+    delivering, which no return value would have revealed.
+    """
+    global ble_scanning, last_adv, last_scan_try, scan_restarts
+    if wifi_busy:
+        return          # the WiFi scan owns the radio right now, by design
+    quiet = time.ticks_diff(now, last_adv) > BLE_SILENCE_MS
+    if ble_scanning and not quiet:
+        return
+    if time.ticks_diff(now, last_scan_try) < SCAN_RETRY_MS:
+        return          # do not hammer the stack while it is unhappy
+    last_scan_try = now
     try:
         ble_radio.gap_scan(None)
     except OSError:
         pass
     try:
+        ble_radio.gap_scan(0, 30000, 30000, True)
+        ble_scanning = True
+        scan_restarts += 1
+        # Restart the silence clock, or every frame for the next 45 seconds
+        # counts as another failure and restarts the scan again.
+        last_adv = now
+    except OSError:
+        ble_scanning = False
+
+
+def _wifi_scan():
+    global evil
+    # The cyw43 shares one radio between WiFi and BLE. With BLE holding a
+    # continuous scan, wlan.scan() still returns APs but every RSSI comes back
+    # as 0, so the listen has to be paused for the duration.
+    global ble_scanning
+    try:
+        ble_radio.gap_scan(None)
+    except OSError:
+        pass
+    ble_scanning = False
+    try:
         raw = wlan.scan()
     except OSError:
         return
     finally:
+        # Not swallowed any more. If the listen does not come back the flag
+        # stays down and _ensure_ble_scan() keeps trying, rather than the badge
+        # running deaf until somebody notices and restarts it.
         try:
             ble_radio.gap_scan(0, 30000, 30000, True)
+            ble_scanning = True
         except OSError:
             pass
     now = time.ticks_ms()
@@ -953,7 +1037,13 @@ def _draw_flags():
     # Exactly one line fits between the last row and the footer bar at H-11,
     # so the loudest finding wins and says everything on that line. A second
     # line here draws underneath the footer text.
-    if flood:
+    #
+    # A deaf radio outranks everything: every other number on this page is
+    # describing a room the badge has stopped listening to.
+    if not ble_scanning or time.ticks_diff(time.ticks_ms(), last_adv) > BLE_SILENCE_MS:
+        screen.pen = RED
+        screen.text("BLE LISTEN DEAD (%d)" % scan_restarts, 8, y + 4)
+    elif flood:
         screen.pen = RED
         screen.text("FLOODING: %d dropped" % flood_dropped, 8, y + 4)
     elif karma >= KARMA_MIN:
@@ -1062,9 +1152,13 @@ def update():
     global wifi_pending, wifi_busy, detail_open, wipe_start
     global cat_filter, cat_cursor, last_battery
     global flood, flood_rate, flood_seen, flood_window, label_demoted
-    global flood_hot, seen_new, seen_old
+    global flood_hot, seen_new, seen_old, last_frame_ms, frame_start
 
     now_ms = time.ticks_ms()
+    # How long the previous frame took, recorded into the health log. A badge
+    # that has slowed to one frame a second is indistinguishable from a frozen
+    # one at arm's length, and the two need different fixes.
+    last_frame_ms = time.ticks_diff(now_ms, frame_start)
 
     # ---- input
     if badge.pressed(BUTTON_B) and not detail_open:
@@ -1157,6 +1251,7 @@ def update():
             seen_new = set()
 
     # ---- work
+    _ensure_ble_scan(now_ms)
     _admit_new()
     _resolve_some()
     _stats_step()
@@ -1182,9 +1277,10 @@ def update():
 
     if time.ticks_diff(now_ms, last_battery) >= BATTERY_EVERY_MS:
         last_battery = now_ms
-        _log_battery()
+        _log_battery(last_frame_ms)
 
     # ---- draw
+    frame_start = now_ms
     screen.pen = SLATE
     screen.clear()
 

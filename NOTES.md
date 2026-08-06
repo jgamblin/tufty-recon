@@ -259,6 +259,53 @@ previous section are for.
 `tools/flood_recon.py` drives the app's own interrupt at a chosen rate so the
 defence can be measured rather than assumed.
 
+## The listen can die without saying so
+
+WiFi and BLE share one radio, so every WiFi scan pauses the BLE listen and then
+re-arms it. That re-arm can fail, and the failure used to be swallowed by a
+bare `except OSError: pass`. Nothing retried it and nothing reported it, so the
+badge carried on with a perfect display, a working button, a live pulse
+indicator and no Bluetooth at all, until somebody noticed and restarted the
+app. At one WiFi scan every 20 seconds, that is a few thousand chances a day
+for one transient error to end collection for good.
+
+Two triggers bring it back, because neither is sufficient alone:
+
+- **The flag**, set only when `gap_scan` actually returned. This catches the
+  honest failure, the one the API is willing to admit to.
+- **Silence.** Any room has some Bluetooth traffic, so hearing nothing at all
+  for `BLE_SILENCE_MS` means the listen is gone whatever the call reported.
+  This is the one that catches a success that did not take.
+
+Restarts are rate limited so a sulking stack is not hammered, skipped entirely
+while a WiFi scan legitimately owns the radio, and counted. The flags page
+shows `BLE LISTEN DEAD` above every other finding, because when the radio is
+deaf every other number on that page is describing a room the badge stopped
+listening to.
+
+## Telemetry, and the day it was missing
+
+The health log samples every two minutes and is the only record of what the
+badge was doing when nobody was watching. It is what identified the flood latch:
+capture and heartbeat went silent in the same windows, with USB connected and
+the voltage flat, which ruled out power in one step.
+
+Then it stopped, on the day it was needed most. It had a 48KB cap and simply
+returned once it hit it, so a whole day of stalls happened with no heartbeat to
+localise them, and the file that should have explained them held nothing newer
+than the previous day. **It rotates now rather than stopping**, keeping one
+generation back, so the cap still bounds the space.
+
+It also records what the app was doing, not just the battery: flood state and
+rate, devices tracked, frame time, whether the listen is alive and how often it
+has been revived. Frame time in particular, because a badge at one frame a
+second is indistinguishable from a frozen one at arm's length and the two need
+different fixes.
+
+`tools/health_report.py` reads it, tolerates both the old six-column and new
+twelve-column rows, and refuses to present the padding on old rows as if it
+were measurement.
+
 ## Rogue access points
 
 WEP has been broken since 2001 and ships on nothing current, so a WEP beacon is
@@ -323,6 +370,9 @@ startup, so it cost nothing measurable, but the cause is still unknown.
 | `tools/export_log.py` | Pull the log off the badge as CSV. |
 | `tools/make_release.py` | Build the drag-and-drop install zip. |
 | `tools/battery_report.py` | Turn recon's voltage log into a runtime figure. |
+| `tools/health_report.py` | Explain what the badge was doing during a stall. |
+| `tools/live_watch.py` | Watch the running app: flood state, tracking, frame time. |
+| `tools/verify_scan_revival.py` | Check that a dead BLE listen is noticed and revived. |
 
 The SHARE view carries a QR to the repository and the URL written out, for
 answering "what is that?" without handing over the badge.

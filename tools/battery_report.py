@@ -47,19 +47,34 @@ def port():
     sys.exit("No Tufty found. Plug it in, or set TUFTY_PORT.")
 
 
+# The health log grew from 6 columns to 12 when app state was added to it. The
+# first six are unchanged and are all this report needs, so both are read
+# rather than one silently skipping the other's rows — which is exactly how a
+# whole day of telemetry went missing once already.
+WIDTHS = (6, 12)
+
+
 def parse(raw):
     rows = []
+    skipped = 0
     for line in raw.splitlines():
-        parts = line.strip().split(",")
-        if len(parts) != 6:
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(",")
+        if len(parts) not in WIDTHS:
+            skipped += 1
             continue
         try:
-            row = tuple(int(p) for p in parts)
+            row = tuple(int(p) for p in parts[:6])
         except ValueError:
+            skipped += 1
             continue
         if row[0] and row[0] < MIN_EPOCH:
             row = (0,) + row[1:]        # clock was not set; keep the sample
         rows.append(row)
+    if skipped:
+        print("note: skipped %d unreadable lines" % skipped, file=sys.stderr)
     return rows
 
 
@@ -91,17 +106,23 @@ def main():
 
     p = port()
     with tempfile.TemporaryDirectory() as tmp:
-        local = os.path.join(tmp, "battery.csv")
-        r = subprocess.run([MPR, "connect", p, "fs", "cp",
-                            ":/state/battery.csv", local],
-                           capture_output=True, text=True)
-        if r.returncode != 0 or not os.path.exists(local):
+        # The badge rotates the log at its size cap, so the older generation
+        # holds anything from before the rotation. Oldest first, so the samples
+        # stay in order.
+        raw = ""
+        for remote in (":/state/battery.csv.1", ":/state/battery.csv"):
+            local = os.path.join(tmp, remote.rsplit("/", 1)[-1])
+            r = subprocess.run([MPR, "connect", p, "fs", "cp", remote, local],
+                               capture_output=True, text=True)
+            if r.returncode == 0 and os.path.exists(local):
+                raw += open(local).read()
+        if not raw:
             sys.exit("No battery log on the badge. Run recon for a while first.")
-        raw = open(local).read()
 
     if args.csv:
         with open(args.csv, "w") as f:
-            f.write("epoch,ticks_ms,millivolts,percent,usb,light\n")
+            f.write("epoch,ticks_ms,millivolts,percent,usb,light,"
+                    "flood,flood_rate,tracked,frame_ms,scan_restarts,scanning\n")
             f.write(raw)
         print("raw samples -> %s" % args.csv)
 

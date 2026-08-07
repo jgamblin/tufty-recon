@@ -259,6 +259,72 @@ previous section are for.
 `tools/flood_recon.py` drives the app's own interrupt at a chosen rate so the
 defence can be measured rather than assumed.
 
+## Hunting a freeze that will not reproduce on a desk
+
+The badge froze twice at DEF CON with a dead USB port, which is a different
+failure from anything else in this file: a stalled *app* still services USB,
+because that runs independently of the Python. Nothing was executing at all.
+The capture log puts one outage at 3h 40m.
+
+**The root cause is still unknown.** What follows is what it is not, each ruled
+out against the real radio, because the eliminations are worth as much as a
+finding would have been:
+
+| Suspect | Test | Result |
+| --- | --- | --- |
+| The WiFi/BLE handover | `hunt_hang.py`, 400 back-to-back cycles | scan a steady 704ms, handover 1ms, no hang |
+| Interrupt workload | `irq_load.py`, recon-shaped work, 90s at 60/s | clean, same as a counting handler |
+| Flash writes vs interrupts | `flash_vs_irq.py`, 1500 writes under load | survived, worst write 7ms |
+| Queueing and drain races | `pin_hang.py`, three variants | all survived |
+
+The handover was the prime suspect and the most satisfying to lose: WiFi and
+BLE share one cyw43, so every WiFi scan stops and re-arms the listen, 4,300
+times a day. Compressing a day into 400 cycles found nothing.
+
+Flash contention was the best hypothesis, because it explains the density
+correlation: on RP2 a flash write disables XIP and runs from RAM, and an
+interrupt landing in that window is a known way to hang the chip hard. At 1600
+times recon's normal write rate it still would not break.
+
+What none of this reaches is the variable that matters. A quiet room delivers
+about 60 advertisements a second; a DEF CON floor delivers orders of magnitude
+more, and interrupt rate is what tracks the freezes. That cannot be synthesised
+— injecting calls into the handler is not the same as a real interrupt landing
+at a real moment — so the honest position is that the mechanism is unproven.
+
+Two things follow from that. The watchdog makes it survivable rather than
+absent: eight seconds of downtime instead of hours. And the scan is configured
+for the lowest interrupt load that costs nothing, which is what the passive
+change below is really about.
+
+## Passive, and why that was a correction
+
+recon shipped calling `gap_scan(..., active=True)`. An active scan transmits a
+scan request to solicit a response from every advertiser it hears, which is how
+a scanner obtains scan-response payloads. The README meanwhile promised "No
+deauthentication, injection, or anything else that transmits". The tool was
+transmitting and the documentation said it did not.
+
+Measured on the real radio, same room, back to back:
+
+| Mode | Advertisements/sec | Devices found |
+| --- | --- | --- |
+| active, 100% duty | 57.6 | 34 |
+| passive, 100% duty | 34.5 | 36 |
+| passive, 50% duty | 17.5 | 31 |
+| passive, 25% duty | 9.2 | 34 |
+
+Passive costs nothing measurable here and cuts the interrupt rate by 40%, which
+is the one load the freezes correlate with. Duty cycle is the stronger control
+still — 25% cuts it by 84% — but a badge walking past a device gets far fewer
+chances to hear it than one standing still, and this test stood still, so the
+duty cycle stays at 100%.
+
+What passive gives up is the scan response, often where a name lives. That cost
+could not be measured: every mode reported zero named devices, **including
+active**, so this room had none to find. If field captures show identification
+getting worse, `SCAN_ACTIVE` is the line to revisit.
+
 ## The listen can die without saying so
 
 WiFi and BLE share one radio, so every WiFi scan pauses the BLE listen and then
@@ -373,6 +439,14 @@ startup, so it cost nothing measurable, but the cause is still unknown.
 | `tools/health_report.py` | Explain what the badge was doing during a stall. |
 | `tools/live_watch.py` | Watch the running app: flood state, tracking, frame time. |
 | `tools/verify_scan_revival.py` | Check that a dead BLE listen is noticed and revived. |
+| `tools/verify_watchdog.py` | Check the watchdog ends a hang without firing on a slow frame. |
+| `tools/hunt_hang.py` | Compress a day of WiFi/BLE handovers into minutes. |
+| `tools/irq_load.py` | Compare interrupt-handler workloads on the real radio. |
+| `tools/flash_vs_irq.py` | Drive flash writes against arriving advertisements. |
+| `tools/pin_hang.py` | Bisect queueing, allocation and drain races. |
+| `tools/scan_modes.py` | Measure active vs passive and duty cycle. |
+| `tools/read_trace.py` | Read the flash breadcrumb after a hang. |
+| `tools/read_modes.py` | Read scan-mode results after a dropped connection. |
 
 The SHARE view carries a QR to the repository and the URL written out, for
 answering "what is that?" without handing over the badge.

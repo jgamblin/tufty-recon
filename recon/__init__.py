@@ -253,6 +253,29 @@ flood_hot = 0               # consecutive windows over FLOOD_ENTER
 # means the listen is gone, whatever the API reported.
 BLE_SILENCE_MS = 45_000
 SCAN_RETRY_MS = 10_000
+
+# How the listen is armed, in one place because it is armed from three.
+#
+# SCAN_ACTIVE is False, and that is a deliberate correction. An active scan
+# transmits a scan request to solicit a response from every advertiser it
+# hears, which is how a scanner obtains scan-response payloads. This app shipped
+# doing that while its README promised "No deauthentication, injection, or
+# anything else that transmits". Passive is what was always claimed, so passive
+# is what it now does.
+#
+# It is also the cheaper of the two by some margin. Measured on the real radio,
+# in the same room, back to back: active drew 57.6 advertisements a second,
+# passive 34.5, and passive found 36 devices against active's 34. Interrupt rate
+# is the load the radio hands the CPU, and it is the one variable that tracks
+# the freezes, so a 40% cut costs nothing measurable and might matter.
+#
+# What passive gives up is the scan response, which is often where a device's
+# name lives. That cost was not measurable here: every mode reported zero named
+# devices, including active, so this room simply had none to find. If field
+# captures show identification getting worse, this is the line to revisit.
+SCAN_INTERVAL_US = 30_000
+SCAN_WINDOW_US = 30_000
+SCAN_ACTIVE = False
 ble_scanning = True
 last_adv = time.ticks_ms()
 last_scan_try = time.ticks_ms()
@@ -434,7 +457,7 @@ def _admit_new():
 ble_radio = bluetooth.BLE()
 ble_radio.active(True)
 ble_radio.irq(_irq)
-ble_radio.gap_scan(0, 30000, 30000, True)
+ble_radio.gap_scan(0, SCAN_INTERVAL_US, SCAN_WINDOW_US, SCAN_ACTIVE)
 
 
 def _ensure_ble_scan(now):
@@ -459,7 +482,7 @@ def _ensure_ble_scan(now):
     except OSError:
         pass
     try:
-        ble_radio.gap_scan(0, 30000, 30000, True)
+        ble_radio.gap_scan(0, SCAN_INTERVAL_US, SCAN_WINDOW_US, SCAN_ACTIVE)
         ble_scanning = True
         scan_restarts += 1
         # Restart the silence clock, or every frame for the next 45 seconds
@@ -489,7 +512,7 @@ def _wifi_scan():
         # stays down and _ensure_ble_scan() keeps trying, rather than the badge
         # running deaf until somebody notices and restarts it.
         try:
-            ble_radio.gap_scan(0, 30000, 30000, True)
+            ble_radio.gap_scan(0, SCAN_INTERVAL_US, SCAN_WINDOW_US, SCAN_ACTIVE)
             ble_scanning = True
         except OSError:
             pass

@@ -47,6 +47,14 @@ Worth being clear, because the badge is not a Pineapple:
 It reads beacons and advertisements, which every device broadcasts openly to
 anyone listening. That is the whole mechanism.
 
+The Bluetooth listen is a **passive** scan, which is worth stating precisely
+because it was not always true. Until recently the badge scanned actively,
+meaning it transmitted a scan request to solicit a response from everything it
+heard, while this section promised the opposite. It now listens only. Measured
+in the same room back to back, passive drew 34.5 advertisements a second
+against active's 57.6 and found 36 devices against 34, so the honest option was
+also the cheaper one.
+
 ## Privacy
 
 This tool records identifiers belonging to other people's devices, and the

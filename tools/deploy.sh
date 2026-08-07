@@ -87,31 +87,35 @@ fi
 echo "Deploying to $VOL"
 mkdir -p "$VOL/apps"
 
-# Replace rather than merge, so a file left behind by an older layout cannot
-# still be imported.
+# Never `rm -rf` the app directory on this volume. Doing so corrupted it three
+# times: the FAT12 filesystem the badge exposes collapses the directory entry
+# into a zero-byte *file* named recon, which MicroPython cannot even list — it
+# raises UnicodeError — and the app is unbootable until the entry is deleted
+# and rebuilt. Overwriting files in place never triggers it.
 #
-# The delete gets checked because it has already gone wrong: the badge dropped
-# off USB midway through one, and the directory entry collapsed into a
-# zero-byte *file* called recon. MicroPython could not even list it, raising
-# UnicodeError, and the app was unbootable. Left unchecked the copy would then
-# fail in a far more confusing way.
+# A corrupt entry from an earlier run is still cleared, because it has to be.
 if [[ -e "$VOL/apps/recon" && ! -d "$VOL/apps/recon" ]]; then
-  echo "Found a stale non-directory at apps/recon (a previous deploy was"
-  echo "interrupted). Clearing it."
+  echo "Clearing a corrupt apps/recon left by an earlier deploy."
   rm -f "$VOL/apps/recon" || true
 fi
-rm -rf "${VOL:?}/apps/recon" || true
-if [[ -e "$VOL/apps/recon" ]]; then
-  echo "Could not clear $VOL/apps/recon." >&2
-  echo "The badge most likely dropped off USB mid-write. Replug it and re-run;" >&2
-  echo "the app on the badge may be incomplete until you do." >&2
-  exit 1
-fi
+rm -f "$VOL/apps/._recon" 2>/dev/null || true
 
 # __pycache__ appears whenever a host-side tool imports identify.py, and it is
 # both useless on the badge and noise in the verification diff below.
 rm -rf recon/__pycache__
-cp -R recon "$VOL/apps/recon"
+
+mkdir -p "$VOL/apps/recon"
+while IFS= read -r rel; do
+  dst="$VOL/apps/recon/$rel"
+  mkdir -p "$(dirname "$dst")"
+  cp "recon/$rel" "$dst"
+done < <(cd recon && find . -type f ! -name '.*' | sed 's|^\./||')
+
+# Anything on the badge that is no longer in the source is removed file by
+# file, so a rename or a dropped module cannot linger and still be imported.
+while IFS= read -r rel; do
+  [[ -f "recon/$rel" ]] || rm -f "$VOL/apps/recon/$rel"
+done < <(cd "$VOL/apps/recon" && find . -type f | sed 's|^\./||')
 
 sync
 # macOS writes resource forks onto FAT volumes; they waste space and clutter

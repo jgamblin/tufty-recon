@@ -24,13 +24,21 @@ GAP_MIN = 4.0                       # sampling is every 2 minutes
 
 COLS = ("epoch", "ticks", "mv", "pct", "usb", "light",
         "flood", "rate", "tracked", "frame_ms", "restarts", "scanning",
-        "boot")
+        "boot", "died_in")
 
 # Row widths this log has had. Six was battery only; twelve added app state;
 # thirteen added the reset cause. All three are read, because a reader that
 # skips what it does not recognise is how a day of telemetry went missing.
-WIDTHS = {6: 6, 12: 12, 13: 13}
+WIDTHS = {6: 6, 12: 12, 13: 13, 14: 14}
 WDT_RESET = 3
+# What the previous run was doing when it stopped writing, from recon's
+# PHASE_CODES. This is the whole point of the 14th column: it separates a hang
+# inside a blocking radio call from one that happened while merely running.
+PHASE = {0: "unknown (or a clean first boot)",
+         1: "running normally, not in a long call",
+         2: "inside a WiFi scan and the radio handover",
+         3: "flushing the log to flash",
+         4: "drawing"}
 
 
 def port():
@@ -172,6 +180,27 @@ def main():
         if boots:
             print("  most recent at %s" % when(boots[-1]))
             print("  a restart nobody asked for means the watchdog ended a hang")
+        # Each restart's first sample carries what the run before it died in.
+        after = [b for a, b in zip(rows, rows[1:]) if b["ticks"] < a["ticks"]]
+        died = [r.get("died_in", 0) for r in after]
+        if died:
+            print()
+            print("  what the run before each restart was doing when it stopped:")
+            for code in sorted(set(died)):
+                n = died.count(code)
+                print("    %3d x  %s" % (n, PHASE.get(code, "code %d" % code)))
+            wifi = died.count(2)
+            if wifi and wifi >= len(died) * 0.6:
+                print()
+                print("  Most restarts happened inside the WiFi scan. That points at a")
+                print("  blocking call running past the watchdog window rather than a")
+                print("  true firmware hang, and the fix is to bound the scan, not to")
+                print("  reboot faster.")
+            elif died.count(1) >= len(died) * 0.6:
+                print()
+                print("  Most restarts happened while merely running, with no long call")
+                print("  in progress. That is a genuine hang, and the watchdog is doing")
+                print("  the only thing that can be done about it from up here.")
 
 
 if __name__ == "__main__":

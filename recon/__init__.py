@@ -118,6 +118,51 @@ BATTERY_EVERY_MS = 120_000
 BATTERY_PATH = "/state/battery.csv"
 BATTERY_MAX_BYTES = 48 * 1024
 
+# What the app was doing when it stopped.
+#
+# The watchdog turned the DEF CON freeze from hours of downtime into about
+# fifteen seconds, but it also revealed how often the freeze happens: ten
+# restarts in one 2h40m evening, roughly one every sixteen minutes. Frame time
+# right before each was normal, so nothing was degrading; the badge was running
+# fine and then stopped dead.
+#
+# That is equally consistent with two very different stories. Either something
+# genuinely hangs the firmware, or a legitimate blocking call occasionally runs
+# past the watchdog window and the watchdog is causing the reboots rather than
+# rescuing from them. wlan.scan() is the obvious candidate: measured at a steady
+# 704ms on a desk, but it owns a radio shared with BLE and nothing bounds it in
+# a crowded room.
+#
+# So the current phase is written to flash before each long operation and read
+# back on the next boot. A reboot that finds "wifi" there was inside a WiFi
+# scan; one that finds "run" was not, which points at a real hang. Two or three
+# small writes a minute is a price worth paying to tell those apart.
+PHASE_PATH = "/state/phase.txt"
+PHASE_CODES = {"boot": 0, "run": 1, "wifi": 2, "flush": 3, "draw": 4}
+_phase_now = "boot"
+
+
+def _phase(name):
+    """Record what is about to happen, so a hang inside it leaves a witness."""
+    global _phase_now
+    if name == _phase_now:
+        return                  # only the transitions are worth a write
+    _phase_now = name
+    try:
+        with open(PHASE_PATH, "w") as f:
+            f.write(name)
+    except OSError:
+        pass                    # telemetry must never take the app down
+
+
+def _read_last_phase():
+    """Whatever the previous run was doing when it stopped writing."""
+    try:
+        with open(PHASE_PATH) as f:
+            return f.read().strip() or "boot"
+    except OSError:
+        return "boot"
+
 # Stale entries are dropped inside the same pass that computes the aggregates,
 # so the walk and its key snapshot are paid for once.
 
@@ -305,6 +350,10 @@ WATCHDOG_MS = 8000
 _wdt = None
 boot_reason = machine.reset_cause() if hasattr(machine, "reset_cause") else 0
 WDT_RESET = getattr(machine, "WDT_RESET", 3)
+# Read once, before anything overwrites it: this is the previous run's dying
+# words, and every health sample this run carries it.
+died_in = _read_last_phase()
+died_in_code = PHASE_CODES.get(died_in, 0)
 
 # Addresses heard recently, kept apart from the live set so that pruning or
 # draining `ble` cannot make familiar devices look new again. Two generations:
@@ -348,7 +397,7 @@ def _log_battery(frame_ms=0):
             # and the badge reboots, which would otherwise make an overnight
             # run impossible to read. ticks_ms second, because comparing the
             # two is what tells a reboot from a hang.
-            f.write("%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n" % (
+            f.write("%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n" % (
                 _now(), time.ticks_ms(), int(badge.battery_voltage() * 1000),
                 badge.battery_level(), 1 if badge.usb_connected() else 0,
                 badge.light_level(),
@@ -363,7 +412,9 @@ def _log_battery(frame_ms=0):
                 # WDT_RESET and cannot be told apart by this value alone. What
                 # distinguishes them is context — an unattended run that shows
                 # a fresh boot nobody asked for is the interesting case.
-                boot_reason))
+                boot_reason,
+                # And what the run before this one was doing when it stopped.
+                died_in_code))
     except OSError:
         pass        # a full disk must not take the app down
 
@@ -498,6 +549,9 @@ def _wifi_scan():
     # continuous scan, wlan.scan() still returns APs but every RSSI comes back
     # as 0, so the listen has to be paused for the duration.
     global ble_scanning
+    # Marked before the pause, not just around wlan.scan(), because the radio
+    # handover is part of the same suspect operation.
+    _phase("wifi")
     try:
         ble_radio.gap_scan(None)
     except OSError:
@@ -531,6 +585,7 @@ def _wifi_scan():
         else:
             e[2] = rssi
             e[5] = now
+    _phase("run")
     # Only meaningful across the whole set, and cheap at WiFi scan cadence.
     evil = ID.find_evil_twins(
         {k: (v[0], v[1], v[2], v[3]) for k, v in wifi.items()})
@@ -1340,7 +1395,9 @@ def update():
 
     if log.dirty and time.ticks_diff(now_ms, last_flush) >= FLUSH_EVERY_MS:
         last_flush = now_ms
+        _phase("flush")
         log.flush(_now())
+        _phase("run")
 
     if time.ticks_diff(now_ms, last_battery) >= BATTERY_EVERY_MS:
         last_battery = now_ms

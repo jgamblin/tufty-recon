@@ -86,9 +86,31 @@ fi
 
 echo "Deploying to $VOL"
 mkdir -p "$VOL/apps"
+
 # Replace rather than merge, so a file left behind by an older layout cannot
 # still be imported.
-rm -rf "${VOL:?}/apps/recon"
+#
+# The delete gets checked because it has already gone wrong: the badge dropped
+# off USB midway through one, and the directory entry collapsed into a
+# zero-byte *file* called recon. MicroPython could not even list it, raising
+# UnicodeError, and the app was unbootable. Left unchecked the copy would then
+# fail in a far more confusing way.
+if [[ -e "$VOL/apps/recon" && ! -d "$VOL/apps/recon" ]]; then
+  echo "Found a stale non-directory at apps/recon (a previous deploy was"
+  echo "interrupted). Clearing it."
+  rm -f "$VOL/apps/recon" || true
+fi
+rm -rf "${VOL:?}/apps/recon" || true
+if [[ -e "$VOL/apps/recon" ]]; then
+  echo "Could not clear $VOL/apps/recon." >&2
+  echo "The badge most likely dropped off USB mid-write. Replug it and re-run;" >&2
+  echo "the app on the badge may be incomplete until you do." >&2
+  exit 1
+fi
+
+# __pycache__ appears whenever a host-side tool imports identify.py, and it is
+# both useless on the badge and noise in the verification diff below.
+rm -rf recon/__pycache__
 cp -R recon "$VOL/apps/recon"
 
 sync

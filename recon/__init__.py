@@ -25,6 +25,7 @@ Holding UP+DOWN together for two seconds on LOG erases the log.
 """
 
 import bluetooth
+import machine
 import network
 import os
 import qrcode
@@ -260,6 +261,28 @@ scan_restarts = 0
 frame_start = time.ticks_ms()
 last_frame_ms = 0
 
+# A hardware watchdog, because the failure it covers cannot be handled in
+# Python. The badge was found at DEF CON with a frozen screen and a dead USB
+# port, which is not an app that stopped collecting: a stalled app still
+# services USB, since that runs independently of this code. Nothing was
+# executing at all, so nothing written here could have noticed or recovered.
+# The capture log puts that outage at 3h 40m.
+#
+# The watchdog does not prevent the hang; it ends it. A wedged badge reboots
+# itself in eight seconds instead of staying dead until somebody notices, and
+# a reboot is nearly free because the log is on flash and de-duplicates against
+# what is already there.
+#
+# 8000ms is close to the RP2350's ceiling and about five times the worst frame
+# ever measured (1.47s under a heavy flood). It is started only after the app
+# has imported, which takes longer than the timeout itself. Set to 0 to
+# disable; holding C during the boot countdown still reaches the launcher if a
+# reboot loop ever needs breaking.
+WATCHDOG_MS = 8000
+_wdt = None
+boot_reason = machine.reset_cause() if hasattr(machine, "reset_cause") else 0
+WDT_RESET = getattr(machine, "WDT_RESET", 3)
+
 # Addresses heard recently, kept apart from the live set so that pruning or
 # draining `ble` cannot make familiar devices look new again. Two generations:
 # when the newer one fills it becomes the older and a fresh one starts, which
@@ -302,7 +325,7 @@ def _log_battery(frame_ms=0):
             # and the badge reboots, which would otherwise make an overnight
             # run impossible to read. ticks_ms second, because comparing the
             # two is what tells a reboot from a hang.
-            f.write("%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n" % (
+            f.write("%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n" % (
                 _now(), time.ticks_ms(), int(badge.battery_voltage() * 1000),
                 badge.battery_level(), 1 if badge.usb_connected() else 0,
                 badge.light_level(),
@@ -310,7 +333,14 @@ def _log_battery(frame_ms=0):
                 # explain it: was it flooding, was it hearing anything, was it
                 # drawing slowly, and had the radio needed reviving.
                 1 if flood else 0, flood_rate, len(ble), frame_ms,
-                scan_restarts, 1 if ble_scanning else 0))
+                scan_restarts, 1 if ble_scanning else 0,
+                # Why this boot happened, with a caveat: on the RP2350
+                # machine.reset() is itself implemented with the watchdog, so
+                # a deliberate reset and a watchdog-recovered hang both report
+                # WDT_RESET and cannot be told apart by this value alone. What
+                # distinguishes them is context — an unattended run that shows
+                # a fresh boot nobody asked for is the interesting case.
+                boot_reason))
     except OSError:
         pass        # a full disk must not take the app down
 
@@ -1152,13 +1182,27 @@ def update():
     global wifi_pending, wifi_busy, detail_open, wipe_start
     global cat_filter, cat_cursor, last_battery
     global flood, flood_rate, flood_seen, flood_window, label_demoted
-    global flood_hot, seen_new, seen_old, last_frame_ms, frame_start
+    global flood_hot, seen_new, seen_old, last_frame_ms, frame_start, _wdt
 
     now_ms = time.ticks_ms()
     # How long the previous frame took, recorded into the health log. A badge
     # that has slowed to one frame a second is indistinguishable from a frozen
     # one at arm's length, and the two need different fixes.
     last_frame_ms = time.ticks_diff(now_ms, frame_start)
+
+    # Armed on the first frame rather than at import, because importing takes
+    # longer than the timeout. From here on, anything that stops this loop for
+    # eight seconds reboots the badge instead of ending its day.
+    if _wdt is None:
+        if WATCHDOG_MS:
+            try:
+                _wdt = machine.WDT(timeout=WATCHDOG_MS)
+            except Exception:   # noqa: BLE001 - a badge without one still runs
+                _wdt = False
+        else:
+            _wdt = False
+    elif _wdt:
+        _wdt.feed()
 
     # ---- input
     if badge.pressed(BUTTON_B) and not detail_open:

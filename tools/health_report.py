@@ -23,7 +23,14 @@ MIN_EPOCH = 1_735_689_600           # 2025-01-01; below this the RTC was unset
 GAP_MIN = 4.0                       # sampling is every 2 minutes
 
 COLS = ("epoch", "ticks", "mv", "pct", "usb", "light",
-        "flood", "rate", "tracked", "frame_ms", "restarts", "scanning")
+        "flood", "rate", "tracked", "frame_ms", "restarts", "scanning",
+        "boot")
+
+# Row widths this log has had. Six was battery only; twelve added app state;
+# thirteen added the reset cause. All three are read, because a reader that
+# skips what it does not recognise is how a day of telemetry went missing.
+WIDTHS = {6: 6, 12: 12, 13: 13}
+WDT_RESET = 3
 
 
 def port():
@@ -54,12 +61,12 @@ def parse(raw):
     for line in raw.splitlines():
         parts = line.strip().split(",")
         state = True
+        if len(parts) not in WIDTHS:
+            continue
         if len(parts) == 6:
             old += 1
             state = False
-            parts = parts + ["0"] * 6
-        elif len(parts) != 12:
-            continue
+        parts = parts + ["0"] * (len(COLS) - len(parts))
         try:
             r = dict(zip(COLS, (int(p) for p in parts)))
         except ValueError:
@@ -145,6 +152,26 @@ def main():
         print("  samples with the listen down: %d" % len(deaf))
         if deaf:
             print("  first at %s" % when(deaf[0]))
+        print()
+
+    # Boots are counted by ticks_ms going backwards, which only a restart can
+    # do. reset_cause is reported too, but it cannot carry this on its own: on
+    # the RP2350 machine.reset() is implemented with the watchdog, so a
+    # deliberate reset is indistinguishable from a watchdog-recovered hang by
+    # that value. An unattended run with restarts nobody asked for is the
+    # signal; the cause code only narrows it.
+    boots = [b for a, b in zip(rows, rows[1:]) if b["ticks"] < a["ticks"]]
+    if rows:
+        print("=== restarts ===")
+        print("  %d restarts across %d samples" % (len(boots), len(rows)))
+        wdt = [r for r in rows if r.get("boot") == WDT_RESET]
+        if wdt:
+            print("  %d samples report WDT_RESET, which covers both a watchdog"
+                  % len(wdt))
+            print("  recovery and a deliberate machine.reset() on this board")
+        if boots:
+            print("  most recent at %s" % when(boots[-1]))
+            print("  a restart nobody asked for means the watchdog ended a hang")
 
 
 if __name__ == "__main__":

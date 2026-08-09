@@ -116,10 +116,41 @@ def _keys(path, head_size):
         i += ln
 
 
+def _ble_walk():
+    """Yield (key, address_kind, label) for every intact Bluetooth record.
+
+    One walk, three facts. Layout is BLE_HEAD then the label: addr(6) kind(1)
+    rssi(1) company(2) first(4), so the kind sits one byte in and the label is
+    whatever follows the fixed head.
+    """
+    try:
+        with open(BLE_PATH, "rb") as f:
+            blob = f.read()
+    except OSError:
+        return
+    if not blob.startswith(MAGIC):
+        return
+    i, n = len(MAGIC), len(blob)
+    while i < n:
+        ln = blob[i]
+        i += 1
+        if ln < BLE_HEAD_SIZE or i + ln > n:
+            return
+        # The label stays raw. Decoding here cost real time for nothing: four
+        # out of five records on a conference log are public addresses, whose
+        # labels the caller throws away, and decoding all of them added about
+        # three seconds to every startup — paid again on each of the ~36
+        # watchdog restarts a day.
+        yield blob[i:i + 6], blob[i + 6], blob[i + BLE_HEAD_SIZE:i + ln]
+        i += ln
+
+
 class Log:
     def __init__(self):
         self.wifi_seen = set()
         self.ble_seen = set()
+        # label -> how many non-public addresses have worn it on disk
+        self.label_counts = {}
         self.pending_wifi = []
         self.pending_ble = []
         self.first_seen = 0
@@ -131,11 +162,27 @@ class Log:
     # ---- load ---------------------------------------------------------------
 
     def load(self):
-        """Read back the keys already on disk so a restart does not duplicate."""
+        """Read back the keys already on disk so a restart does not duplicate.
+
+        The Bluetooth pass also tallies labels per non-public address, because
+        the share rule that caps a rotating label at eight lives in RAM and the
+        watchdog now restarts the app every fifteen minutes or so. Doing it in
+        this walk rather than a second one matters: a separate pass took import
+        from 4.5s to 9s, and every one of those restarts pays it.
+        """
         for key in _keys(WIFI_PATH, WIFI_HEAD_SIZE):
             self.wifi_seen.add(key)
-        for key in _keys(BLE_PATH, BLE_HEAD_SIZE):
+        counts = self.label_counts
+        for key, kind, raw in _ble_walk():
             self.ble_seen.add(key)
+            if kind == 0 or not raw:        # public addresses never count
+                continue
+            try:
+                label = bytes(raw).decode("utf-8").rstrip("\x00")
+            except UnicodeError:
+                continue                    # a damaged label is not counted
+            if label:
+                counts[label] = counts.get(label, 0) + 1
         try:
             with open(META_PATH, "rb") as f:
                 self.first_seen = struct.unpack("<I", f.read(4))[0]
@@ -231,6 +278,8 @@ class Log:
     def erase(self):
         self.wifi_seen = set()
         self.ble_seen = set()
+        # label -> how many non-public addresses have worn it on disk
+        self.label_counts = {}
         self.pending_wifi = []
         self.pending_ble = []
         self.first_seen = 0

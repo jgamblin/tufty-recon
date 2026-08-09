@@ -233,6 +233,22 @@ label_demoted = 0
 KARMA_MIN = 3
 
 
+def _seed_label_shares():
+    """Adopt the share counts store.Log rebuilt from disk.
+
+    Without this the rule restarts from zero on every boot, and the watchdog
+    now reboots after a hang roughly every fifteen minutes. Measured across one
+    DEF CON day: 36 restarts, and labels that should have stopped at eight
+    reached 62, 49 and 21 instead — 115 records, 7.6% of the day, arriving
+    purely as an artefact of recovering from hangs.
+
+    The counts come from the same walk that rebuilds the address set, so this
+    costs nothing beyond what startup already paid.
+    """
+    label_shares.update(log.label_counts)
+    return len(label_shares)
+
+
 def _label_discriminates(label):
     """Record one more random address wearing this label, and say whether the
     label still tells devices apart. Demotion is one-way for the session."""
@@ -255,6 +271,8 @@ def _label_discriminates(label):
 
 pending = []      # BLE addrs awaiting identification
 log = Log()
+# Carried across reboots, because the watchdog now causes plenty of them.
+seeded_labels = _seed_label_shares()
 
 view = BILLBOARD
 filt = F_ALL

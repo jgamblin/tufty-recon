@@ -21,8 +21,11 @@ MPR="${MPR:-.venv/bin/mpremote}"
 [[ -x "$MPR" ]] || MPR="$(command -v mpremote || true)"
 
 find_volume() {
+  # The directory appears before the filesystem is mounted on it, and writing
+  # into that bare, root-owned mount point fails with "Permission denied". So
+  # wait for the mount itself, and for it to take writes.
   for v in /Volumes/TUFTY "/run/media/$USER/TUFTY" "/media/$USER/TUFTY" /media/TUFTY; do
-    [[ -d "$v" ]] && { echo "$v"; return 0; }
+    [[ -d "$v" && -w "$v" ]] && mount | grep -q " on $v " && { echo "$v"; return 0; }
   done
   # Not mounted is an ordinary outcome, not a failure. Falling off the end of
   # the loop returns the failed test's status, which under `set -e` kills the

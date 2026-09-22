@@ -14,6 +14,7 @@ view's frame time and the memory in use.
 import badgeware  # noqa: F401
 import builtins
 import gc
+import machine
 import os
 import sys
 import time
@@ -35,6 +36,18 @@ sys.path.insert(0, PATH)
 os.chdir(PATH)
 m = __import__(PATH)
 update = _cap[0]
+# The app arms an 8s hardware watchdog on its first frame, and on the RP2350
+# nothing can stop one once started. The badge boots straight into recon, so
+# one is usually already counting when this runs, and injecting a conference's
+# worth of devices between levels takes longer than 8s. Adopt it and feed it
+# through the slow parts rather than reboot mid-run.
+if m.WATCHDOG_MS:
+    m._wdt = machine.WDT(timeout=m.WATCHDOG_MS)
+
+
+def feed():
+    if m._wdt:
+        m._wdt.feed()
 
 # Keep the real radios from fighting the measurement.
 try:
@@ -53,6 +66,8 @@ def synth(n_ble, n_wifi):
     for i in range(n_ble):
         addr = bytes((0xC0 | (i & 0x3F), (i >> 6) & 0xFF, (i >> 14) & 0xFF,
                       i & 0xFF, (i >> 8) & 0xFF, (i >> 16) & 0xFF))
+        if not i & 0xFF:
+            feed()
         # Spread across buckets the way a real room does.
         cat = i % m.ID.N_CATS
         # Entry layout must match the app, including the vendor slot.
@@ -114,6 +129,7 @@ print("%-14s %s  %s" % ("devices",
 
 for n_ble, n_wifi in LEVELS:
     synth(n_ble, n_wifi)
+    feed()
     gc.collect()
     before = gc.mem_free()
     times = [bench(v) for _n, v in VIEWS]

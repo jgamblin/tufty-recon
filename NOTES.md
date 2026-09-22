@@ -6,10 +6,22 @@ measurements were surprising.
 
 ## Firmware baseline
 
-Built against Pimoroni badgeware **v2.0.2**. That release renamed the injected
-`io` global to `badge` and turned button state into calls
-(`badge.pressed(BUTTON_B)`), so apps written for 2.0.x will not run on 1.x and
-vice versa.
+Built against Pimoroni badgeware **v3.1.0**, the first release with everything
+it needs. v3 changed the drawing API under every app:
+
+- `rom_font.winds` became `font.winds`, and `load_font("MonaSans-Medium")`
+  became `font.load("MonaSans-Medium")`, which searches the same paths and
+  returns a pixel or vector font as appropriate.
+- The `qrcode` module is gone. The SHARE view uses `image.qr()`, added in
+  v3.1.0, which returns the code as one pixel per module to blit scaled.
+- `screen.text(s, x, y[, size])` kept its positional form, so nothing else in
+  the drawing code had to change. Inline `[name]` markup is only parsed when
+  text is laid out in a `rect`; every call here passes a point, so an SSID
+  containing brackets is drawn literally.
+
+v2.0.2 had earlier renamed the injected `io` global to `badge` and turned
+button state into calls (`badge.pressed(BUTTON_B)`). The app will not start on
+2.x or 1.x.
 
 `/system` is read-only from MicroPython. Installing means putting the badge into
 USB mass storage mode and writing to the mounted volume, which is why
@@ -28,7 +40,14 @@ until that was found.
 A conference hall is two orders of magnitude busier than a quiet room, and the
 failure modes only appear there, so `tools/stress_recon.py` injects synthetic
 devices. Every view now holds under 11ms a frame up to 1800 devices, against a
-shipped live-set cap of 1200.
+shipped live-set cap of 1200. Firmware v3.1.0 made that faster without any
+change here: 6.1ms worst at the 1200 cap and 8.5ms at 1800.
+
+The badge boots straight into recon, which arms the hardware watchdog, and an
+RP2350 watchdog cannot be stopped once started. So any on-device tool that
+interrupts the app has about 8 seconds before the badge reboots under it,
+unless it keeps feeding. `stress_recon.py` adopts the watchdog and feeds it
+while injecting devices; short tools finish well inside the window.
 
 Measured at 3000 devices, before any of this:
 

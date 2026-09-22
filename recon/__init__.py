@@ -28,7 +28,6 @@ import bluetooth
 import machine
 import network
 import os
-import qrcode
 import sys
 import time
 
@@ -747,7 +746,7 @@ def _tag_colour(tags):
 def _header(title, right=""):
     screen.pen = HEAD_BG
     screen.rectangle(0, 0, W, 13)
-    screen.font = rom_font.winds
+    screen.font = font.winds
     screen.pen = CYAN
     screen.text(title, 4, 0)
     if right:
@@ -758,7 +757,7 @@ def _header(title, right=""):
 def _footer(left):
     screen.pen = FAINT
     screen.rectangle(0, H - 11, W, 11)
-    screen.font = rom_font.winds
+    screen.font = font.winds
     screen.pen = DIM
     screen.text(left, 4, H - 12)
     if wifi_busy:
@@ -901,7 +900,7 @@ def _draw_no_database():
     """The most likely install mistake is copying recon/ without recon/data/,
     which otherwise looks like a working scanner that recognises nothing."""
     _header("RECON")
-    screen.font = rom_font.winds
+    screen.font = font.winds
     screen.pen = RED
     screen.text("vendor database missing", 8, 22)
     screen.pen = DIM
@@ -934,7 +933,7 @@ _big = None
 def _draw_billboard():
     global _big
     if _big is None:
-        _big = load_font("MonaSans-Medium")
+        _big = font.load("MonaSans-Medium")
 
     total = log.wifi_count + log.ble_count
     s = str(total)
@@ -962,7 +961,7 @@ def _draw_billboard():
     screen.pen = FG
     screen.text(label, (W - lw) / 2, 74 - LABEL_SIZE * INK_TOP, LABEL_SIZE)
 
-    screen.font = rom_font.winds
+    screen.font = font.winds
     if flood:
         # Being spammed is a finding, not just a condition to survive.
         msg = "BLE FLOOD  %d/sec" % flood_rate
@@ -997,10 +996,11 @@ def _draw_share():
     camera will not focus or a phone is in a pocket."""
     global _qr
     if _qr is None:
-        _qr = qrcode.QRCode()
-        _qr.set_text(REPO_URL)
+        # One pixel per module, black on white. The quiet zone is drawn below
+        # rather than baked in, because four modules of it would not fit.
+        _qr = image.qr(REPO_URL, image.QR_MEDIUM, 0)
 
-    n = _qr.get_size()[0]
+    n = _qr.width
     scale = 3
     span = n * scale
     ox, oy = (W - span) / 2, 4
@@ -1008,14 +1008,10 @@ def _draw_share():
     # Quiet zone stays white whatever the theme; scanners need the border.
     screen.pen = color.rgb(255, 255, 255)
     screen.rectangle(ox - 4, oy - 4, span + 8, span + 8)
-    screen.pen = color.rgb(0, 0, 0)
-    for qy in range(n):
-        for qx in range(n):
-            if _qr.get_module(qx, qy):
-                screen.rectangle(ox + qx * scale, oy + qy * scale, scale, scale)
+    screen.blit(_qr, rect(ox, oy, span, span))
 
     # Two lines: the whole URL on one is about 180px against a 160px screen.
-    screen.font = rom_font.winds
+    screen.font = font.winds
     y = oy + span + 4
     for line, pen in ((REPO_TEXT, FG), (REPO_TEXT2, CYAN)):
         w = screen.measure_text(line)[0]
@@ -1049,11 +1045,11 @@ def _draw_dash():
         screen.pen = CAT_COLOUR[i] if n else DIM
         screen.rectangle(cx + 5, cy + 4, 4, 12)
 
-        screen.font = rom_font.smart
+        screen.font = font.smart
         screen.pen = FG if n else DIM
         screen.text(str(n), cx + 13, cy - 1)
 
-        screen.font = rom_font.winds
+        screen.font = font.winds
         screen.pen = DIM
         screen.text(ID.CAT_NAME[i], cx + 13, cy + 12)
 
@@ -1062,7 +1058,7 @@ def _draw_live():
     shown = len(order)
     _header(ID.CAT_NAME[cat_filter].upper() if cat_filter is not None else "LIVE",
             "%d+" % shown if shown >= LIVE_CAP else "%d" % shown)
-    screen.font = rom_font.winds
+    screen.font = font.winds
 
     if not order:
         screen.pen = DIM
@@ -1101,7 +1097,7 @@ def _draw_detail():
     label, detail, tags = _label_of(kind, key)
 
     _header("WIFI AP" if kind == "W" else "BLE DEVICE", "%d dBm" % rssi)
-    screen.font = rom_font.winds
+    screen.font = font.winds
 
     screen.pen = FG
     screen.text(label[:24], 4, 15)
@@ -1135,7 +1131,7 @@ def _draw_detail():
 
 def _draw_flags():
     _header("FLAGS", "%d live" % stats["live"])
-    screen.font = rom_font.winds
+    screen.font = font.winds
 
     open_aps = stats["open"]
     wep_aps = stats["wep"]
@@ -1187,7 +1183,7 @@ def _draw_flags():
 
 def _draw_vendors():
     _header("VENDORS", "%d live" % stats["live"])
-    screen.font = rom_font.winds
+    screen.font = font.winds
 
     rows = stats["vendors"]
     if not rows:
@@ -1215,7 +1211,7 @@ def _draw_vendors():
 
 def _draw_log():
     _header("LOG", "%d KB" % stats["log_kb"])
-    screen.font = rom_font.winds
+    screen.font = font.winds
 
     mins = time.ticks_diff(time.ticks_ms(), started) // 60000
     use = stats["log_use"]
@@ -1236,13 +1232,16 @@ def _draw_log():
         # whole conference day drops out of the report. Cheap to notice here,
         # expensive to discover a week later.
         rows.append(("NO CLOCK", "unset", RED))
+    # Six rows fit at 12px. The warning rows push the meter's caption into the
+    # footer, and a warning is exactly when that caption matters, so close up.
+    step = 12 if len(rows) <= 6 else (10 if len(rows) == 7 else 9)
     y = 15
     for name, val, col in rows:
         screen.pen = DIM
         screen.text(name, 8, y)
         screen.pen = col
         screen.text(val, 104, y)
-        y += 12
+        y += step
 
     # Capacity meter. The filesystem is 1MB and shared, so filling it silently
     # is a real way to lose a day of collection.

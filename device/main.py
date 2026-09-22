@@ -34,11 +34,11 @@ def _countdown():
 
         screen.pen = color.rgb(10, 14, 22)
         screen.clear()
-        screen.font = rom_font.nope
+        screen.font = font.nope
         screen.pen = color.rgb(46, 200, 224)
         s = "RECON"
         screen.text(s, (160 - screen.measure_text(s)[0]) / 2, 40)
-        screen.font = rom_font.winds
+        screen.font = font.winds
         screen.pen = color.rgb(226, 238, 248, 130)
         s = "hold C for launcher"
         screen.text(s, (160 - screen.measure_text(s)[0]) / 2, 62)

@@ -57,7 +57,7 @@ merge it, and that removes the apps the badge shipped with.
 macOS users can instead double-click install-macos.command, which copies each
 app individually and cannot clobber anything.
 
-Requires badgeware firmware v2.0.2 or newer:
+Requires badgeware firmware v3.1.0 or newer:
 https://github.com/pimoroni/tufty2350/releases
 
 Personalise

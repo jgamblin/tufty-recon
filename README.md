@@ -84,7 +84,9 @@ No toolchain, no Python.
 3. Open the zip's `apps` folder and drag `recon` into `TUFTY/apps`, then eject.
    On macOS you can double-click `install-macos.command` instead.
 
-Needs badgeware firmware **v2.0.2 or newer**.
+Needs badgeware firmware **v3.1.0 or newer**. It will not start on 2.x, because
+v3 changed the font and QR APIs, so update the badge first from
+[pimoroni/tufty2350 releases](https://github.com/pimoroni/tufty2350/releases).
 
 ## Using it
 
@@ -243,8 +245,8 @@ tools/run.sh tools/stress_recon.py
 
 `smoke.py` runs the app for 40 frames and reports failures, framerate and
 memory. `stress_recon.py` drives it at conference scale with synthetic devices,
-which is how most of the performance work got found: every view holds under
-11ms a frame up to 1800 devices.
+which is how most of the performance work got found: on firmware v3.1.0 every
+view holds under 9ms a frame up to 1800 devices (11ms on v2).
 
 Every screenshot here came off the hardware, not a mockup — the framebuffer is
 plain RGBA8888 and `screen.raw` exposes it:

@@ -68,9 +68,30 @@ if [[ -z "$VOL" ]]; then
   echo "Found badge on $PORT"
 
   echo "Switching badge to mass storage mode..."
+  # Reboot first, and catch the badge before recon starts.
+  #
+  # The badge boots straight into recon, which arms an 8s hardware watchdog
+  # that nothing can stop once it is running. Dropping the app into mass
+  # storage mode leaves nobody feeding it, so the badge used to reset itself
+  # part way through the copy: "fcopyfile failed: Device not configured", with
+  # a half-written app left on the volume.
+  #
+  # A reset gives a REPL about 1.6s later, and the countdown plus the app's
+  # import mean the first frame is ~3.1s away, so this lands in between and
+  # the watchdog is never armed.
+  "$MPR" connect "$PORT" exec "import machine; machine.reset()" >/dev/null 2>&1 || true
+  # The device node lingers for a moment after the reset, so wait for it to go
+  # before waiting for it to come back, or this matches the stale one.
+  for _ in $(seq 1 100); do [[ -e "$PORT" ]] || break; sleep 0.05; done
+  for _ in $(seq 1 200); do [[ -e "$PORT" ]] && break; sleep 0.05; done
+
   # This call never returns: the device re-enumerates as a USB disk while the
   # REPL is still open. Fire it off and stop waiting once the volume appears.
-  "$MPR" connect "$PORT" exec "import _msc" >/dev/null 2>&1 &
+  # Retried because the port is briefly busy right after it reappears.
+  (for _ in $(seq 1 30); do
+     "$MPR" connect "$PORT" exec "import _msc" >/dev/null 2>&1 && break
+     sleep 0.1
+   done) &
   trigger=$!
   for _ in $(seq 1 30); do
     VOL="$(find_volume)"
@@ -151,7 +172,7 @@ if [[ -n "$MPR" && -x "$MPR" ]]; then
     sleep 1
     # `|| true` is load-bearing twice over. While the badge is still rebooting
     # grep matches nothing and exits 1, which `pipefail` turns into a failed
-    # assignment and `set -e` turns into a silent exit — the exact failure this
+    # assignment and `set -e` turns into a silent exit, the exact failure this
     # whole verification block exists to catch. And the test must not be the
     # loop's last command, or a final miss makes the loop itself return 1.
     PORT="${TUFTY_PORT:-$("$MPR" devs 2>/dev/null | grep -i -m1 'tufty' | cut -d' ' -f1 || true)}"
@@ -164,6 +185,17 @@ if [[ -n "$MPR" && -x "$MPR" ]]; then
     echo "Re-run once it is back on USB." >&2
     exit 1
   fi
+  # The badge has booted into recon by now and armed the watchdog, which would
+  # reset it part way through the read below. Reset once more and catch the
+  # REPL during the boot countdown, the same trick the mass storage switch
+  # above uses, so nothing is running to reboot underneath this.
+  "$MPR" connect "$PORT" exec "import machine; machine.reset()" >/dev/null 2>&1 || true
+  for _ in $(seq 1 100); do [[ -e "$PORT" ]] || break; sleep 0.05; done
+  for _ in $(seq 1 200); do [[ -e "$PORT" ]] && break; sleep 0.05; done
+  for _ in $(seq 1 30); do
+    "$MPR" connect "$PORT" exec "pass" >/dev/null 2>&1 && break
+    sleep 0.1
+  done
   # Sum the bytes of every deployed source file and compare. Sizes alone would
   # miss an edit that happens to preserve length, which is exactly the shape of
   # a changed threshold. Both sides sum and count the same bytes, so the order

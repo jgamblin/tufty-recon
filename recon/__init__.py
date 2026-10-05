@@ -939,6 +939,14 @@ def _draw_billboard():
     s = str(total)
     screen.font = _big
 
+    # Firmware v3 leaves antialiasing off by default, which a 76px curve shows
+    # plainly: this is the one view meant to be read from a distance, and the
+    # stepping on the digits was the first thing reviewers noticed. Switched on
+    # around the vector text only. It costs about 1.1ms on a view that already
+    # sleeps 150ms a frame, and the pixel fonts every other view uses are
+    # unaffected by it either way.
+    screen.antialias = image.X4
+
     size = BILLBOARD_SIZES[-1]
     for candidate in BILLBOARD_SIZES:
         if screen.measure_text(s, candidate)[0] <= W - 14:
@@ -961,6 +969,7 @@ def _draw_billboard():
     screen.pen = FG
     screen.text(label, (W - lw) / 2, 74 - LABEL_SIZE * INK_TOP, LABEL_SIZE)
 
+    screen.antialias = image.OFF
     screen.font = font.winds
     if flood:
         # Being spammed is a finding, not just a condition to survive.
